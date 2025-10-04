@@ -16,10 +16,12 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests beautifulsoup4
-      - name: Run monitor
-        run: python ur_monitor.py
-        env:
-          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+- name: Run monitor
+  run: python ur_monitor.py
+  env:
+    CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
+    CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+
       - name: Persist state
         if: always()
         run: |

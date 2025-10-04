@@ -1,0 +1,30 @@
+name: UR Monitor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"  # Every 30 minutes (UTC). Script filters by JST window.
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # allow committing .state.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests beautifulsoup4
+      - name: Run monitor
+        run: python ur_monitor.py
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+      - name: Persist state
+        if: always()
+        run: |
+          git config user.name "ur-monitor-bot"
+          git config user.email "bot@example.com"
+          git add .state.json || true
+          git commit -m "state update" || true
+          git push || true

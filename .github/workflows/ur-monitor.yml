@@ -2,7 +2,7 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # 30分ごと（UTC）。スクリプト側でJST時間帯を判定
+    - cron: "*/15 * * * *"   # 15分ごと（UTC）。スクリプト側でJST 9:30–18:30のみ実行
   workflow_dispatch:
 
 jobs:

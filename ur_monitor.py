@@ -175,22 +175,28 @@ def save_state(s):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(sorted(list(s)), f, ensure_ascii=False, indent=2)
 
-def notify(msg: str):
-    token = os.getenv("LINE_NOTIFY_TOKEN")
-    if not token:
+def notify(msg):
+    token = os.getenv("CHATWORK_TOKEN")
+    room_id = os.getenv("CHATWORK_ROOM_ID")
+    if not token or not room_id:
+        # シークレット未設定ならログだけ出す
         print(msg)
         return
+
+    body = msg if len(msg) <= 9000 else (msg[:9000] + "\n…(truncated)")
+
     try:
-        resp = requests.post(
-            "https://notify-api.line.me/api/notify",
-            headers={"Authorization": f"Bearer {token}"},
-            data={"message": msg},
-            timeout=15
+        r = requests.post(
+            f"https://api.chatwork.com/v2/rooms/{room_id}/messages",
+            headers={"X-ChatWorkToken": token},
+            data={"body": f"[info][title]UR監視[/title]{body}[/info]"},
+            timeout=15,
         )
-        print(f"notify_status={resp.status_code}")
+        print(f"chatwork_status={r.status_code} {r.text[:120]}")
     except Exception as e:
         print(f"notify_failed: {e}")
         print(msg)
+
 
 def main():
     now = datetime.now(JST)

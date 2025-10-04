@@ -3,7 +3,7 @@ name: UR Monitor
 on:
   schedule:
     - cron: "*/30 * * * *"   # 30分ごと（UTC）。スクリプト側でJST時間帯を判定
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   run:
@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install deps
         run: |
@@ -23,10 +23,10 @@ jobs:
           pip install requests beautifulsoup4
 
       - name: Run monitor
-        run: python ur_monitor.py
         env:
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+        run: python ur_monitor.py   # ur_monitor.py がリポ直下にある前提
 
       - name: Persist state
         if: always()

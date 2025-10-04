@@ -179,24 +179,20 @@ def notify(msg):
     token = os.getenv("CHATWORK_TOKEN")
     room_id = os.getenv("CHATWORK_ROOM_ID")
     if not token or not room_id:
-        # シークレット未設定ならログだけ出す
-        print(msg)
+        print(msg)  # 未設定ならログ出力のみ
         return
-
     body = msg if len(msg) <= 9000 else (msg[:9000] + "\n…(truncated)")
-
     try:
         r = requests.post(
             f"https://api.chatwork.com/v2/rooms/{room_id}/messages",
             headers={"X-ChatWorkToken": token},
             data={"body": f"[info][title]UR監視[/title]{body}[/info]"},
-            timeout=15,
+            timeout=15
         )
         print(f"chatwork_status={r.status_code} {r.text[:120]}")
     except Exception as e:
         print(f"notify_failed: {e}")
         print(msg)
-
 
 def main():
     now = datetime.now(JST)

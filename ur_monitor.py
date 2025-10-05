@@ -130,8 +130,6 @@ def fetch_page(idx: int):
     return parse_entries(r.text)
 
 def fetch_all():
-    # 既存の POST ロジックでOK。失敗時は None を返すようにしておく。
-    # 例：
     items = []
     for i in (0, 1, 2):
         try:
@@ -142,19 +140,39 @@ def fetch_all():
                     "Origin": "https://www.ur-net.go.jp",
                     "Referer": "https://www.ur-net.go.jp/",
                 },
-                data="rent_low=&rent_high=&floorspace_low=&floorspace_high=&shisya=20&danchi=708&shikibetu=0&newBukkenRoom=&orderByField=0&orderBySort=0&pageIndex={}&sp=".format(i),
+                data=(
+                    "rent_low=&rent_high=&floorspace_low=&floorspace_high=&"
+                    "shisya=20&danchi=708&shikibetu=0&newBukkenRoom=&"
+                    "orderByField=0&orderBySort=0&pageIndex={}&sp="
+                ).format(i),
                 timeout=15,
             )
             r.raise_for_status()
-        except Exception as e:
-            print(f"fetch_failed: {e}")
-            return None  # ← 重要：失敗時は None
 
-        # ここはあなたの既存パースに合わせて
-        j = r.json()
-        rows = j.get("resultList") or j.get("rows") or j.get("data") or []
+            # JSONデコード（失敗や想定外の型は安全に中断）
+            try:
+                j = r.json()
+            except Exception as e:
+                print(f"json_decode_failed page={i}: {e} body[:200]={r.text[:200]!r}")
+                return None
+
+        except Exception as e:
+            print(f"fetch_failed page={i}: {e}")
+            return None
+
+        # ------ 正規化：dict / list / None すべて吸収 ------
+        if isinstance(j, list):
+            rows = j
+        elif isinstance(j, dict):
+            rows = j.get("resultList") or j.get("rows") or j.get("data") or []
+        else:
+            rows = []
+        # -----------------------------------------------
+
         if not rows:
+            # データが空なら次ページ以降は見ない
             break
+
         for r0 in rows:
             items.append((
                 r0.get("id"),
@@ -165,6 +183,7 @@ def fetch_all():
                 r0.get("rent"),
                 r0.get("commonfee"),
             ))
+
     return set(items)
 
 def canonicalize(rooms):

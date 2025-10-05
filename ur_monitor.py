@@ -11,6 +11,10 @@ from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 
+import os, json, time, requests  # 既存のimportに足りないものがあれば足す
+STATE_PATH = ".state.json"
+URL = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"
+
 # ---------------------- Config ----------------------
 # Asia/Tokyo window: 09:30–18:30 (inclusive), every 30 minutes via cron (UTC)
 JST = timezone(timedelta(hours=9))
@@ -144,6 +148,44 @@ def fetch_all():
                 time.sleep(2)
     return out
 
+def fetch_all():
+    # 既存の POST ロジックでOK。失敗時は None を返すようにしておく。
+    # 例：
+    items = []
+    for i in (0, 1, 2):
+        try:
+            r = requests.post(
+                "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Origin": "https://www.ur-net.go.jp",
+                    "Referer": "https://www.ur-net.go.jp/",
+                },
+                data="rent_low=&rent_high=&floorspace_low=&floorspace_high=&shisya=20&danchi=708&shikibetu=0&newBukkenRoom=&orderByField=0&orderBySort=0&pageIndex={}&sp=".format(i),
+                timeout=15,
+            )
+            r.raise_for_status()
+        except Exception as e:
+            print(f"fetch_failed: {e}")
+            return None  # ← 重要：失敗時は None
+
+        # ここはあなたの既存パースに合わせて
+        j = r.json()
+        rows = j.get("resultList") or j.get("rows") or j.get("data") or []
+        if not rows:
+            break
+        for r0 in rows:
+            items.append((
+                r0.get("id"),
+                r0.get("name"),
+                r0.get("type"),
+                r0.get("floorspace"),
+                r0.get("floor"),
+                r0.get("rent"),
+                r0.get("commonfee"),
+            ))
+    return set(items)
+
 def canonicalize(rooms):
     canon = []
     for r in rooms:
@@ -171,9 +213,36 @@ def load_state():
             return set()
     return set()
 
+def load_state():
+    # ファイル無い → 初回だけ初期化
+    if not os.path.exists(STATE_PATH):
+        return set(), True
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # 後方互換: 旧 [] 形式 / 新 {"rooms":[...]} 形式の両方を読む
+        if isinstance(data, dict) and "rooms" in data:
+            rooms = data["rooms"]
+        elif isinstance(data, list):
+            rooms = data
+        else:
+            print("state_format_invalid")
+            return set(), True
+        return set(tuple(x) for x in rooms), False
+    except Exception as e:
+        print(f"state_load_error: {e}")
+        return set(), True
+
 def save_state(s):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(sorted(list(s)), f, ensure_ascii=False, indent=2)
+
+def save_state(s: set):
+    payload = {"rooms": sorted(list(s))}
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_PATH)
 
 def notify(msg):
     token = os.getenv("CHATWORK_TOKEN")
@@ -233,6 +302,33 @@ def main():
         save_state(current)
     else:
         print("変更なし")
+
+if __name__ == "__main__":
+    main()
+
+def main():
+    prev, is_init = load_state()
+
+    current = fetch_all()
+    if current is None:
+        print("fetch_failed_keep_state")  # 失敗時は保存せず終了
+        return
+
+    if is_init:
+        notify(f"【UR監視 初期化】 件数: {len(current)}\n{URL}")
+    elif current != prev:
+        added = current - prev
+        removed = prev - current
+        lines = []
+        if added:
+            lines.append("＋ " + " / ".join([a[1] for a in sorted(added)][:5]))
+        if removed:
+            lines.append("－ " + " / ".join([a[1] for a in sorted(removed)][:5]))
+        notify("【UR監視 変化あり】\n" + ("\n".join(lines) if lines else "差分あり") + f"\n{URL}")
+    else:
+        print("変更なし")
+
+    save_state(current)  # 正常取得のときだけ保存
 
 if __name__ == "__main__":
     main()

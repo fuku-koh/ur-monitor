@@ -11,9 +11,9 @@ from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 
-import os, json, time, requests  # 既存のimportに足りないものがあれば足す
+import os, json, time, requests
 STATE_PATH = ".state.json"
-URL = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"
+URL = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"  # 通知に添える人間向けURL
 
 # ---------------------- Config ----------------------
 # Asia/Tokyo window: 09:30–18:30 (inclusive), every 30 minutes via cron (UTC)
@@ -130,25 +130,6 @@ def fetch_page(idx: int):
     return parse_entries(r.text)
 
 def fetch_all():
-    out = []
-    for idx in PAGE_INDEXES:
-        # attempt with one retry
-        for attempt in (1, 2):
-            try:
-                rooms = fetch_page(idx)
-                if idx == 0 and not rooms:
-                    return []
-                if not rooms:
-                    return out
-                out.extend(rooms)
-                break
-            except Exception as e:
-                if attempt == 2:
-                    raise
-                time.sleep(2)
-    return out
-
-def fetch_all():
     # 既存の POST ロジックでOK。失敗時は None を返すようにしておく。
     # 例：
     items = []
@@ -204,16 +185,6 @@ def canonicalize(rooms):
     return sorted(set(canon))
 
 def load_state():
-    if os.path.exists(STATE_PATH):
-        try:
-            with open(STATE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return set(tuple(x) for x in data)
-        except Exception:
-            return set()
-    return set()
-
-def load_state():
     # ファイル無い → 初回だけ初期化
     if not os.path.exists(STATE_PATH):
         return set(), True
@@ -262,49 +233,6 @@ def notify(msg):
     except Exception as e:
         print(f"notify_failed: {e}")
         print(msg)
-
-def main():
-    now = datetime.now(JST)
-    if not in_window(now):
-        print("skip_out_of_window")
-        return
-
-    try:
-        rooms = fetch_all()
-    except Exception as e:
-        notify(f"【UR監視エラー】{now:%Y-%m-%d %H:%M} 失敗: {e}")
-        print("FAIL", e)
-        sys.exit(1)
-
-    current = set(canonicalize(rooms))
-    prev = load_state()
-
-    if not prev:
-        save_state(current)
-        notify(f"【UR監視 初期化】{now:%Y-%m-%d %H:%M} 件数: {len(current)}\n{PROPERTY_LINK}")
-        return
-
-    added = current - prev
-    removed = prev - current
-
-    if added or removed:
-        lines = [f"【UR新着/更新】{now:%Y-%m-%d %H:%M}"]
-        if added:
-            lines.append("＋ 追加:")
-            for x in sorted(added):
-                lines.append("  - " + " / ".join(filter(None, x)))
-        if removed:
-            lines.append("－ 消滅:")
-            for x in sorted(removed):
-                lines.append("  - " + " / ".join(filter(None, x)))
-        lines.append(PROPERTY_LINK)
-        notify("\n".join(lines))
-        save_state(current)
-    else:
-        print("変更なし")
-
-if __name__ == "__main__":
-    main()
 
 def main():
     prev, is_init = load_state()

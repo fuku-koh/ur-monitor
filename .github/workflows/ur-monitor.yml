@@ -2,9 +2,14 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 5分おき（UTC）
+    # UTC 01:00〜08:59 （JST 10:00〜17:59）を5分おき
+    - cron: "*/5 1-8 * * *"
+    # UTC 00:30〜00:59（JST 09:30〜09:59）
+    - cron: "30-59/5 0 * * *"
+    # UTC 09:00〜09:30（JST 18:00〜18:30）
+    - cron: "0-30/5 9 * * *"
   workflow_dispatch: {}
-
+  
 jobs:
   run:
     runs-on: ubuntu-latest

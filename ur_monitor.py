@@ -44,13 +44,23 @@ STATE_PATH = ".state.json"
 
 # ---------------------- Helpers ----------------------
 
+JST = timezone(timedelta(hours=9))
+WINDOW_START = (9, 30)   # 09:30 JST
+WINDOW_END   = (18, 30)  # 18:30 JST
+
 def in_window(now: datetime) -> bool:
-    """Return True if now is between [WINDOW_START, WINDOW_END] JST inclusive."""
+    """now（JST想定）が 9:30〜18:30 の範囲なら True"""
+    # 念のためJST化（nowがnaive/UTCの可能性がある時の保険）
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=JST)
+    else:
+        now = now.astimezone(JST)
+
     s_h, s_m = WINDOW_START
     e_h, e_m = WINDOW_END
-    after_start = (now.hour > s_h) or (now.hour == s_h and now.minute >= s_m)
-    before_end  = (now.hour < e_h) or (now.hour == e_h and now.minute <= e_m)
-    return after_start and before_end
+    start = now.replace(hour=s_h, minute=s_m, second=0, microsecond=0)
+    end   = now.replace(hour=e_h, minute=e_m, second=0, microsecond=0)
+    return start <= now <= end
 
 def decode_area(s: str) -> str:
     if not s:
@@ -254,6 +264,12 @@ def notify(msg):
         print(msg)
 
 def main():
+
+    now = datetime.now(JST)           # ← JST の現在時刻
+    if not in_window(now):            # ← 窓外なら何もしない
+        print("skip_out_of_window")
+        return
+        
     prev, is_init = load_state()
 
     current = fetch_all()

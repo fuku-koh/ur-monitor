@@ -18,8 +18,8 @@ URL = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"  # 通知に�
 # ---------------------- Config ----------------------
 # Asia/Tokyo window: 09:30–18:30 (inclusive), every 30 minutes via cron (UTC)
 JST = timezone(timedelta(hours=9))
-WINDOW_START = (9, 30)   # 09:30 JST
-WINDOW_END   = (18, 30)  # 18:30 JST
+WINDOW_START = (9, 0)      # 09:00 JST
+WINDOW_END   = (18, 59)    # 18:59 JST まで
 
 # UR endpoint + payload (as shared)
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
@@ -45,8 +45,8 @@ STATE_PATH = ".state.json"
 # ---------------------- Helpers ----------------------
 
 JST = timezone(timedelta(hours=9))
-WINDOW_START = (9, 30)   # 09:30 JST
-WINDOW_END   = (18, 30)  # 18:30 JST
+WINDOW_START = (9, 0)      # 09:00 JST
+WINDOW_END   = (18, 59)    # 18:59 JST まで
 
 def in_window(now: datetime) -> bool:
     """now（JST想定）が 9:30〜18:30 の範囲なら True"""
@@ -58,8 +58,9 @@ def in_window(now: datetime) -> bool:
 
     s_h, s_m = WINDOW_START
     e_h, e_m = WINDOW_END
-    start = now.replace(hour=s_h, minute=s_m, second=0, microsecond=0)
-    end   = now.replace(hour=e_h, minute=e_m, second=0, microsecond=0)
+    start = now.replace(hour=s_h, minute=s_m, second=0,  microsecond=0)
+    # 59分の「最後の秒」まで含める
+    end   = now.replace(hour=e_h, minute=e_m, second=59, microsecond=999000)
     return start <= now <= end
 
 def decode_area(s: str) -> str:

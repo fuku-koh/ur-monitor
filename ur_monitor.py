@@ -48,11 +48,10 @@ JST = timezone(timedelta(hours=9))
 WINDOW_START = (9, 30)   # 09:30 JST
 WINDOW_END   = (18, 59)  # 18:59 JST（inclusive）
 
-def in_window(now_utc: datetime) -> bool:
-    j = now_utc.astimezone(JST)
-    start = j.replace(hour=WINDOW_START[0], minute=WINDOW_START[1], second=0, microsecond=0)
-    end   = j.replace(hour=WINDOW_END[0],   minute=WINDOW_END[1],   second=59, microsecond=0)
-    return start <= j <= end
+def in_window(now: datetime) -> bool:
+    start = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    end   = now.replace(hour=18, minute=59, second=59, microsecond=0)
+    return start <= now <= end
 
 def decode_area(s: str) -> str:
     if not s:
@@ -256,10 +255,10 @@ def notify(msg):
         print(msg)
 
 def main():
-    now = datetime.now(timezone.utc)  # まず UTC で
-    if not in_window(now):
-        print("skip_out_of_window")
-        return
+   now = datetime.now(JST)
+if not in_window(now):
+    print("skip_out_of_window")
+    return
 
     if is_init:
         notify(f"【UR監視 初期化】 件数: {len(current)}\n{URL}")

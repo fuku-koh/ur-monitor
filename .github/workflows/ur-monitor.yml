@@ -2,47 +2,62 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 24時間 5分おき（UTC）
+    - cron: '2-59/7 * * * *'   # UTC。2分から7分間隔（0分・5分を避ける）
   workflow_dispatch: {}
 
 jobs:
   run:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
     concurrency:
       group: ur-monitor
       cancel-in-progress: true
-    permissions:
-      contents: write  # .state.json をコミットするため
 
     steps:
       - uses: actions/checkout@v4
 
+      # <<< ここで高速プリチェック >>>
+      - name: Precheck window (JST 09:30–18:59)
+        id: win
+        shell: bash
+        run: |
+          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+          if [ "$jst_hm" -ge 0930 ] && [ "$jst_hm" -le 1859 ]; then
+            echo "inwin=true" >> "$GITHUB_OUTPUT"
+            echo "in window: $jst_hm JST"
+          else
+            echo "inwin=false" >> "$GITHUB_OUTPUT"
+            echo "skip_out_of_window ($jst_hm JST)"
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.win.outputs.inwin == 'true'
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Cache pip
+        if: steps.win.outputs.inwin == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-v1
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          restore-keys: ${{ runner.os }}-pip-
 
       - name: Install deps
+        if: steps.win.outputs.inwin == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
       - name: Run monitor
+        if: steps.win.outputs.inwin == 'true'
         env:
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
         run: python ur_monitor.py
 
       - name: Persist state
-        if: always()
+        if: steps.win.outputs.inwin == 'true' && always()
         run: |
           git config user.name "ur-monitor-bot"
           git config user.email "bot@example.com"

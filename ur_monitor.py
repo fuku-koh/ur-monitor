@@ -48,20 +48,11 @@ JST = timezone(timedelta(hours=9))
 WINDOW_START = (9, 30)   # 09:30 JST
 WINDOW_END   = (18, 59)  # 18:59 JST（inclusive）
 
-def in_window(now: datetime) -> bool:
-    """now（JST想定）が 9:30〜18:30 の範囲なら True"""
-    # 念のためJST化（nowがnaive/UTCの可能性がある時の保険）
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=JST)
-    else:
-        now = now.astimezone(JST)
-
-    s_h, s_m = WINDOW_START
-    e_h, e_m = WINDOW_END
-    start = now.replace(hour=s_h, minute=s_m, second=0,  microsecond=0)
-    # 59分の「最後の秒」まで含める
-    end   = now.replace(hour=e_h, minute=e_m, second=59, microsecond=999000)
-    return start <= now <= end
+def in_window(now_utc: datetime) -> bool:
+    j = now_utc.astimezone(JST)
+    start = j.replace(hour=WINDOW_START[0], minute=WINDOW_START[1], second=0, microsecond=0)
+    end   = j.replace(hour=WINDOW_END[0],   minute=WINDOW_END[1],   second=59, microsecond=0)
+    return start <= j <= end
 
 def decode_area(s: str) -> str:
     if not s:
@@ -265,17 +256,9 @@ def notify(msg):
         print(msg)
 
 def main():
-
-    now = datetime.now(JST)           # ← JST の現在時刻
-    if not in_window(now):            # ← 窓外なら何もしない
+    now = datetime.now(timezone.utc)  # まず UTC で
+    if not in_window(now):
         print("skip_out_of_window")
-        return
-        
-    prev, is_init = load_state()
-
-    current = fetch_all()
-    if current is None:
-        print("fetch_failed_keep_state")  # 失敗時は保存せず終了
         return
 
     if is_init:

@@ -256,7 +256,7 @@ def notify(msg):
 
 def main():
     now = datetime.now(JST)
-    if not is_inwindow(now):
+    if not in_window(now):
         print("skip_out_of_window")
         return  # ← ここは関数内なのでOK
 

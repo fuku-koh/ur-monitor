@@ -15,59 +15,66 @@ jobs:
     permissions:
       contents: write   # .state.json を push するため
 
-    steps:
-      - uses: actions/checkout@v4
+steps:
+  # 1) まず Precheck を最初に
+  - name: Precheck window (JST 09:30–18:59)
+    id: win
+    shell: bash
+    run: |
+      jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+      if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
+        echo "inwin=true"  >> "$GITHUB_OUTPUT"
+        echo "jst_hm=$jst_hm" >> "$GITHUB_OUTPUT"
+        echo "in window: $jst_hm JST"
+      else
+        echo "inwin=false" >> "$GITHUB_OUTPUT"
+        echo "jst_hm=$jst_hm" >> "$GITHUB_OUTPUT"
+        echo "skip_out_of_window ($jst_hm JST)"
+      fi
 
-      # <<< JST 09:30–18:59 だけ実行 >>>
-      - name: Precheck window (JST 09:30–18:59)
-        id: win
-        shell: bash
-        run: |
-          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          # 10# を付けて 10進数として比較（先頭ゼロの罠を回避）
-          if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
-            echo "inwin=true" >> "$GITHUB_OUTPUT"
-            echo "in window: ${jst_hm} JST"
-          else
-            echo "inwin=false" >> "$GITHUB_OUTPUT"
-            echo "skip_out_of_window (${jst_hm} JST)"
-          fi
+  # 2) 時間内のときだけ checkout（ここに if を追加）
+  - name: Checkout
+    if: steps.win.outputs.inwin == 'true'
+    uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        if: steps.win.outputs.inwin == 'true'
-        with:
-          python-version: '3.11'
+  # 以降のステップは今まで通り "inwin" 条件を付けておけばOK
+  - name: Setup Python
+    if: steps.win.outputs.inwin == 'true'
+    uses: actions/setup-python@v5
+    with:
+      python-version: '3.11'
 
-      - name: Cache pip
-        if: steps.win.outputs.inwin == 'true'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-v1
-          restore-keys: ${{ runner.os }}-pip-
+  - name: Cache pip
+    if: steps.win.outputs.inwin == 'true'
+    uses: actions/cache@v4
+    with:
+      path: ~/.cache/pip
+      key: ${{ runner.os }}-pip-v1
+      restore-keys: |
+        ${{ runner.os }}-pip-
 
-      - name: Install deps
-        if: steps.win.outputs.inwin == 'true'
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+  - name: Install deps
+    if: steps.win.outputs.inwin == 'true'
+    run: |
+      python -m pip install --upgrade pip
+      pip install requests beautifulsoup4
 
-      - name: Run monitor
-        if: steps.win.outputs.inwin == 'true'
-        env:
-          CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
-          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
-        run: python ur_monitor.py
+  - name: Run monitor
+    if: steps.win.outputs.inwin == 'true'
+    env:
+      CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
+      CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+    run: python ur_monitor.py
 
-      - name: Persist state
-        if: steps.win.outputs.inwin == 'true' && always()
-        run: |
-          git config user.name "ur-monitor-bot"
-          git config user.email "bot@example.com"
-          git add .state.json
-          if ! git diff --cached --quiet -- .state.json; then
-            git commit -m "state update"
-            git push
-          else
-            echo "no state changes"
-          fi
+  - name: Persist state
+    if: steps.win.outputs.inwin == 'true' && always()
+    run: |
+      git config user.name "ur-monitor-bot"
+      git config user.email "bot@example.com"
+      git add .state.json
+      if ! git diff --cached --quiet -- .state.json; then
+        git commit -m "state update"
+        git push
+      else
+        echo "no state changes"
+      fi

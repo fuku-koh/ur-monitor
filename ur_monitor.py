@@ -15,11 +15,11 @@ import os, json, time, requests
 STATE_PATH = ".state.json"
 URL = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"  # 通知に添える人間向けURL
 
-# ---------------------- Config ----------------------
-# Asia/Tokyo window: 09:30–18:30 (inclusive), every 30 minutes via cron (UTC)
+# --- Config ---
+# Asia/Tokyo window
 JST = timezone(timedelta(hours=9))
-WINDOW_START = (9, 0)      # 09:00 JST
-WINDOW_END   = (18, 59)    # 18:59 JST まで
+WINDOW_START = (9, 30)   # 09:30 JST
+WINDOW_END   = (18, 59)  # 18:59 JST（inclusive）
 
 # UR endpoint + payload (as shared)
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
@@ -45,8 +45,8 @@ STATE_PATH = ".state.json"
 # ---------------------- Helpers ----------------------
 
 JST = timezone(timedelta(hours=9))
-WINDOW_START = (9, 0)      # 09:00 JST
-WINDOW_END   = (18, 59)    # 18:59 JST まで
+WINDOW_START = (9, 30)   # 09:30 JST
+WINDOW_END   = (18, 59)  # 18:59 JST（inclusive）
 
 def in_window(now: datetime) -> bool:
     """now（JST想定）が 9:30〜18:30 の範囲なら True"""

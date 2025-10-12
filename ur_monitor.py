@@ -255,26 +255,33 @@ def notify(msg):
         print(msg)
 
 def main():
-   now = datetime.now(JST)
-if not in_window(now):
-    print("skip_out_of_window")
-    return
+    now = datetime.now(JST)
+    if not is_inwindow(now):
+        print("skip_out_of_window")
+        return  # ← ここは関数内なのでOK
+
+    prev, is_init = load_state()
+
+    current = fetch_all()
+    if current is None:
+        print("fetch_failed_keep_state")
+        return
 
     if is_init:
-        notify(f"【UR監視 初期化】 件数: {len(current)}\n{URL}")
+        notify(f"[UR監視 初期化] 件数: {len(current)}\n{URL}")
     elif current != prev:
-        added = current - prev
+        added  = current - prev
         removed = prev - current
         lines = []
         if added:
-            lines.append("＋ " + " / ".join([a[1] for a in sorted(added)][:5]))
+            lines.append("+ " + " / ".join([a[1] for a in sorted(added)][:5]))
         if removed:
-            lines.append("－ " + " / ".join([a[1] for a in sorted(removed)][:5]))
+            lines.append("− " + " / ".join([a[1] for a in sorted(removed)][:5]))
         notify("【UR監視 変化あり】\n" + ("\n".join(lines) if lines else "差分あり") + f"\n{URL}")
     else:
         print("変更なし")
 
-    save_state(current)  # 正常取得のときだけ保存
+    save_state(current)
 
 if __name__ == "__main__":
     main()

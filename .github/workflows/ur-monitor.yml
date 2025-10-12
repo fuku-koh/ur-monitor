@@ -2,7 +2,7 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: '2-59/7 * * * *'   # UTC。2分から7分間隔（0分・5分を避ける）
+    - cron: '2-59/7 * * * *'   # UTC, 2分から7分間隔（0分・5分を避ける）
   workflow_dispatch: {}
 
 jobs:
@@ -12,22 +12,25 @@ jobs:
     concurrency:
       group: ur-monitor
       cancel-in-progress: true
+    permissions:
+      contents: write   # .state.json を push するため
 
     steps:
       - uses: actions/checkout@v4
 
-      # <<< ここで高速プリチェック >>>
+      # <<< JST 09:30–18:59 だけ実行 >>>
       - name: Precheck window (JST 09:30–18:59)
         id: win
         shell: bash
         run: |
           jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          if [ "$jst_hm" -ge 0930 ] && [ "$jst_hm" -le 1859 ]; then
+          # 10# を付けて 10進数として比較（先頭ゼロの罠を回避）
+          if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
             echo "inwin=true" >> "$GITHUB_OUTPUT"
-            echo "in window: $jst_hm JST"
+            echo "in window: ${jst_hm} JST"
           else
             echo "inwin=false" >> "$GITHUB_OUTPUT"
-            echo "skip_out_of_window ($jst_hm JST)"
+            echo "skip_out_of_window (${jst_hm} JST)"
           fi
 
       - uses: actions/setup-python@v5

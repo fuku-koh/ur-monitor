@@ -2,11 +2,8 @@ name: UR Monitor
 
 on:
   schedule:
-    # 7分おき（02,09,16,...,58）
-    - cron: "2-59/7 * * * *"
-    # 3分ずらした 7分おき（03,10,17,...,59）
-    - cron: "3-59/7 * * * *"
-  workflow_dispatch: {}
+    - cron: "2-59/7 * * * *"   # 7分おき（位相1）
+    - cron: "3-59/7 * * * *"   # 7分おき（位相2、冗長化）
 
 jobs:
   run:
@@ -16,21 +13,18 @@ jobs:
       group: ur-monitor
       cancel-in-progress: true
     permissions:
-      contents: write   # .state.json を push するため
+      contents: write
 
     steps:
-      # 1) 実行時間帯の事前判定（JST 09:30〜18:59 だけ true）
       - name: Precheck window (JST 09:30–18:59)
         id: win
         shell: bash
         run: |
-          jst_hm="$(TZ=Asia/Tokyo date +%H%M)"
+          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
           if [[ "$jst_hm" -ge 0930 && "$jst_hm" -le 1859 ]]; then
             echo "inwin=true"  >> "$GITHUB_OUTPUT"
-            echo "in_window: $jst_hm JST"
           else
             echo "inwin=false" >> "$GITHUB_OUTPUT"
-            echo "skip_out_of_window: $jst_hm JST"
           fi
 
       - uses: actions/checkout@v4

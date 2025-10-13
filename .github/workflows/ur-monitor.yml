@@ -2,7 +2,10 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: '2-59/7 * * * *'   # 7分おき（JST 09:30〜18:59は下のprecheckで判定）
+    # 7分おき（02,09,16,...,58）
+    - cron: "2-59/7 * * * *"
+    # 3分ずらした 7分おき（03,10,17,...,59）
+    - cron: "3-59/7 * * * *"
   workflow_dispatch: {}
 
 jobs:

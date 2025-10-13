@@ -2,8 +2,10 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: "2-59/7 * * * *"   # 7分おき（位相1）
-    - cron: "3-59/7 * * * *"   # 7分おき（位相2、冗長化）
+    - cron: "2-59/7 * * * *"   # UTC, 7分おき位相1
+    - cron: "3-59/7 * * * *"   # UTC, 7分おき位相2
+  workflow_dispatch:           # ← これがあると「Run workflow」ボタンが出る
+
 
 jobs:
   run:

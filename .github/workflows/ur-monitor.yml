@@ -1,11 +1,11 @@
 name: UR Monitor
 
 on:
+  # 7分おきに起動（UTC）。時間帯の制御は下の Precheck で行う。
   schedule:
-    - cron: "2-59/7 * * * *"   # UTC, 7分おき位相1
-    - cron: "3-59/7 * * * *"   # UTC, 7分おき位相2
-  workflow_dispatch:           # ← これがあると「Run workflow」ボタンが出る
-
+    - cron: "2-59/7 * * * *"
+  # 手動実行も可能にする
+  workflow_dispatch: {}
 
 jobs:
   run:
@@ -14,56 +14,65 @@ jobs:
     concurrency:
       group: ur-monitor
       cancel-in-progress: true
+
+    # .state.json をコミット・プッシュするために必要
     permissions:
       contents: write
 
     steps:
+      # ───────────── JST 09:30–18:59 だけ実行するプリチェック ─────────────
       - name: Precheck window (JST 09:30–18:59)
         id: win
         shell: bash
         run: |
           jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          if [[ "$jst_hm" -ge 0930 && "$jst_hm" -le 1859 ]]; then
-            echo "inwin=true"  >> "$GITHUB_OUTPUT"
+          # 先頭ゼロの数値を安全に数値化するため 10# を付与
+          if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
+            echo "inwindow=true"           >> "$GITHUB_OUTPUT"
+            echo "in_window=$jst_hm JST"   >> "$GITHUB_OUTPUT"
+            echo "Within window: $jst_hm JST"
           else
-            echo "inwin=false" >> "$GITHUB_OUTPUT"
+            echo "inwindow=false"                >> "$GITHUB_OUTPUT"
+            echo "skip_out_of_window=$jst_hm JST" >> "$GITHUB_OUTPUT"
+            echo "Out of window: $jst_hm JST"
           fi
 
-      - uses: actions/checkout@v4
-        if: steps.win.outputs.inwin == 'true'
+      # ───────────── 以降の処理はウィンドウ内のときだけ実行 ─────────────
+      - name: Checkout
+        if: steps.win.outputs.inwindow == 'true'
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        if: steps.win.outputs.inwin == 'true'
+        if: steps.win.outputs.inwindow == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Cache pip
-        if: steps.win.outputs.inwin == 'true'
+        if: steps.win.outputs.inwindow == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-v1
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          restore-keys: ${{ runner.os }}-pip-
 
       - name: Install deps
-        if: steps.win.outputs.inwin == 'true'
+        if: steps.win.outputs.inwindow == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
       - name: Run monitor
-        if: steps.win.outputs.inwin == 'true'
+        if: steps.win.outputs.inwindow == 'true'
         env:
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
         run: python ur_monitor.py
 
       - name: Persist state
-        if: steps.win.outputs.inwin == 'true' && always()
+        if: steps.win.outputs.inwindow == 'true' && always()
         run: |
-          git config user.name "ur-monitor-bot"
+          git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
           git add .state.json
           if ! git diff --cached --quiet -- .state.json; then
@@ -72,3 +81,9 @@ jobs:
           else
             echo "no state changes"
           fi
+
+      # ウィンドウ外で起動したときのログだけ残す（処理は実施しない）
+      - name: Skip (out of window)
+        if: steps.win.outputs.inwindow != 'true'
+        run: |
+          echo "Skip outside JST window: ${{ steps.win.outputs.skip_out_of_window || 'unknown' }}"

@@ -33,13 +33,12 @@ jobs:
         shell: bash
         run: |
           jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          # 先頭0対策で 10# を付けて 10進数として評価
           if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
             echo "inwindow=true"  >> "$GITHUB_OUTPUT"
           else
             echo "inwindow=false" >> "$GITHUB_OUTPUT"
           fi
-            echo "jst_hm=$jst_hm"   >> "$GITHUB_OUTPUT"
+          echo "jst_hm=$jst_hm"   >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         if: steps.win.outputs.inwin == 'true'
@@ -54,7 +53,7 @@ jobs:
           pip install requests beautifulsoup4
 
       - name: Run monitor
-        if: steps.win.outputs.inwin == 'true'
+        if: steps.win.outputs.inwindow == 'true'
         env:
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}

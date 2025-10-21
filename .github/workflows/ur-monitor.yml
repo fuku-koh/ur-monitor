@@ -2,11 +2,11 @@ name: UR Monitor
 
 on:
   schedule:
-    # 10分おき × 2本（衝突しにくいよう 5分ずらし）
+    # 10分おき × 2本（5分ずらし、衝突しにくい）
     - cron: '1,11,21,31,41,51 * * * *'   # 軸A
+    - cron: '6,16,26,36,46,56 * * * *'   # 軸B
   workflow_dispatch: {}
 
-# 手動とスケジュールが互いに消し合わないようイベント別に分離
 concurrency:
   group: ur-monitor-${{ github.event_name }}
   cancel-in-progress: true
@@ -16,43 +16,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
+    permissions:
+      contents: write   # .state.json を push するため
+
     steps:
       - uses: actions/checkout@v4
 
-      # 手動/スケジュールの見分け（任意・デバッグ用）
+      # デバッグ用：イベント名とUTC/JSTを必ず1行残す
       - name: Heartbeat (always run)
         run: |
           echo "Triggered by: ${{ github.event_name }}"
-          echo "JST: $(TZ=Asia/Tokyo date)"
+          echo "UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "JST: TZ=Asia/Tokyo date -> $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S')"
 
-      # 稼働時間チェック（09:30–18:59 JST）
+      # 稼働時間チェック（JST 09:30–18:59）
       - name: Precheck window (JST 09:30–18:59)
         id: win
         shell: bash
         run: |
-          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+          jst_hm=$(TZ=Asia/Tokyo date +%H%M)         # 例: 0937
           if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
             echo "inwindow=true"  >> "$GITHUB_OUTPUT"
           else
             echo "inwindow=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "jst_hm=$jst_hm" >> "$GITHUB_OUTPUT"
+          echo "jst_hm=$jst_hm"    >> "$GITHUB_OUTPUT"   # ← ログに残す
 
-      # Python を必ず用意
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        if: ${{ steps.win.outputs.inwindow == 'true' }}
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 依存インストール（稼働時間内のみ）
       - name: Install deps
-        if: steps.win.outputs.inwindow == 'true'
+        if: ${{ steps.win.outputs.inwindow == 'true' }}
         run: |
           python -m pip install --upgrade pip
-          python -m pip install requests beautifulsoup4
+          pip install requests beautifulsoup4
 
-      # 監視本体（稼働時間内のみ）
       - name: Run monitor
-        if: steps.win.outputs.inwindow == 'true'
+        if: ${{ steps.win.outputs.inwindow == 'true' }}
         env:
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
@@ -61,7 +64,7 @@ jobs:
       - name: Persist state
         if: always()
         run: |
-          git config user.name "ur-monitor-bot"
+          git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
           git add .state.json || true
           if ! git diff --cached --quiet -- .state.json; then
@@ -70,5 +73,3 @@ jobs:
           else
             echo "no state changes"
           fi
-
-# refresh

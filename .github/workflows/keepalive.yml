@@ -1,7 +1,8 @@
 name: keepalive
 on:
   schedule:
-    - cron: '15 1 * * *'   # JST 10:15 に1日1回。時間は何時でもOK（UTCで指定）
+    - cron: '15 1 * * *'   # JST 10:15
+  workflow_dispatch: {}     # ←これを追加（手動実行ボタンが出ます）
 
 permissions:
   contents: write

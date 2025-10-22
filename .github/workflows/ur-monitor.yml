@@ -2,16 +2,14 @@ name: UR Monitor
 
 on:
   schedule:
-    # JST 09:30–18:59 ＝ UTC 00:30–09:59
-    - cron: "30-59/10 0 * * *"       # 00:30, 00:40, 00:50 UTC (= 09:30, 09:40, 09:50 JST)
-    - cron: "0-59/10 1-9 * * *"      # 01:00..09:50 UTC (= 10:00..18:50 JST)
-    # 衝突を避けるために +3 分ずらしシリーズ
-    - cron: "33-59/10 0 * * *"       # 00:33, 00:43, 00:53 ...
-    - cron: "3-59/10 1-9 * * *"      # 01:03..09:53 ...
-  workflow_dispatch: {}
+    - cron: "*/10 * * * *"   # UTC基準。10分おきに起動だけさせる
+  workflow_dispatch: {}       # 手動実行用（任意）
+
+permissions:
+  contents: write             # .state.json を push するため
 
 concurrency:
-  group: ur-monitor-${{ github.event_name }}
+  group: ur-monitor
   cancel-in-progress: true
 
 jobs:
@@ -19,57 +17,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    permissions:
-      contents: write   # .state.json を push するため
-
     steps:
-      - uses: actions/checkout@v4
-
-      # デバッグ用：イベント名とUTC/JSTを必ず1行残す
-      - name: Heartbeat (always run)
-        run: |
-          echo "Triggered by: ${{ github.event_name }}"
-          echo "UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
-          echo "JST: TZ=Asia/Tokyo date -> $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M:%S')"
-
-      # 稼働時間チェック（JST 09:30–18:59）
-      - name: Precheck window (JST 09:30–18:59)
-        id: win
+      # まずは時間帯チェックだけ（checkout不要）
+      - name: Window gate (JST 09:30–19:00 only)
+        id: gate
         shell: bash
         run: |
-          jst_hm=$(TZ=Asia/Tokyo date +%H%M)         # 例: 0937
-          if (( 10#$jst_hm >= 930 && 10#$jst_hm <= 1859 )); then
+          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+          if [[ $jst_hm -ge 0930 && $jst_hm -lt 1900 ]]; then
             echo "inwindow=true"  >> "$GITHUB_OUTPUT"
+            echo "JST now: $jst_hm"
           else
             echo "inwindow=false" >> "$GITHUB_OUTPUT"
+            echo "skip: out of window (JST $jst_hm)"
           fi
-          echo "jst_hm=$jst_hm"    >> "$GITHUB_OUTPUT"   # ← ログに残す
 
-      - name: Setup Python
-        if: ${{ steps.win.outputs.inwindow == 'true' }}
-        uses: actions/setup-python@v5
+      # ここから先は稼働時間内だけ実行
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.inwindow == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.inwindow == 'true'
         with:
           python-version: '3.11'
 
       - name: Install deps
-        if: ${{ steps.win.outputs.inwindow == 'true' }}
+        if: steps.gate.outputs.inwindow == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
       - name: Run monitor
-        if: ${{ steps.win.outputs.inwindow == 'true' }}
+        if: steps.gate.outputs.inwindow == 'true'
         env:
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
         run: python ur_monitor.py
 
       - name: Persist state
-        if: always()
+        if: steps.gate.outputs.inwindow == 'true' && always()
         run: |
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
-          git add .state.json || true
+          git add .state.json
           if ! git diff --cached --quiet -- .state.json; then
             git commit -m "state update"
             git push

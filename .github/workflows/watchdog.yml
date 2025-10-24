@@ -69,4 +69,3 @@ jobs:
           gh api -X POST \
             /repos/${GITHUB_REPOSITORY}/actions/workflows/ur-monitor.yml/dispatches \
             -f ref="$branch" \
-            -f inputs:='{"via":"watchdog"}'

@@ -11,9 +11,12 @@ from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 
-import os, json, time, requests
-STATE_PATH = ".state.json"
-URL = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"  # 通知に添える人間向けURL
+# 物件IDとステートファイル名はワークフローから渡す（デフォルトは既存と互換）
+PROP_ID    = os.getenv("PROP_ID", "7080")
+STATE_PATH = os.getenv("STATE_FILE", ".state.json")
+
+# 通知に添える人間向けURLは物件IDで可変にする
+URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
 
 # --- Config ---
 # Asia/Tokyo window

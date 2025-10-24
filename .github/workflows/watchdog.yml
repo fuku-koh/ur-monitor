@@ -1,8 +1,8 @@
 name: watchdog
 on:
   schedule:
-    - cron: "*/5 * * * *"        # 5分おき（UTC）
-  workflow_dispatch: {}           # ←手動テストもできるように
+    - cron: "*/5 * * * *"          # 5分おき（UTC）
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -26,19 +26,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}
         run: |
-          wf_file="ur-monitor.yml"  # ←ファイル名が一致していること！
-          last_created_at=$(gh api -H "Accept: application/vnd.github+json" \
-            /repos/${GITHUB_REPOSITORY}/actions/workflows/$wf_file/runs \
-            -f per_page=1 -q '.workflow_runs[0].created_at' || true)
-          echo "last_created_at=$last_created_at"
+          set -e
+          repo="${GITHUB_REPOSITORY}"
+          wf_path=".github/workflows/ur-monitor.yml"   # ←実ファイルパス
+          # workflow ID を取得（ファイル名解決の曖昧さを排除）
+          wf_id=$(gh api /repos/$repo/actions/workflows --jq \
+                 ".workflows[] | select(.path==\"$wf_path\").id" || true)
 
-          # 12分以上空いてたら「穴」と判定
-          if [ -z "$last_created_at" ] || [ "$last_created_at" = "null" ]; then
+          if [ -z "$wf_id" ]; then
+            echo "⚠️ workflow id not found for $wf_path。stale とみなす"
             echo "stale=true" >> $GITHUB_OUTPUT
-          else
-            last_ts=$(date -u -d "$last_created_at" +%s)
-            now_ts=$(date -u +%s)
-            [ $last_ts -lt $(( now_ts - 12*60 )) ] && echo "stale=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 最新 run の作成時刻を取得
+          last_created_at=$(gh api /repos/$repo/actions/workflows/$wf_id/runs \
+            -f per_page=1 --jq '.workflow_runs[0].created_at' || true)
+
+          echo "last_created_at=${last_created_at:-<none>}"
+
+          # 値が無い / 404 など異常応答 / パース不能 はすべて “stale”
+          if [ -z "$last_created_at" ] || [ "$last_created_at" = "null" ] \
+             || ! date -u -d "$last_created_at" >/dev/null 2>&1; then
+            echo "stale=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          last_ts=$(date -u -d "$last_created_at" +%s)
+          now_ts=$(date -u +%s)
+          # 12分以上空いていたら “穴”
+          if [ $last_ts -lt $(( now_ts - 12*60 )) ]; then
+            echo "stale=true" >> $GITHUB_OUTPUT
           fi
 
       - name: バックアップ発火（workflow_dispatch）

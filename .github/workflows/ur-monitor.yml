@@ -19,6 +19,7 @@ jobs:
     # ここがポイント：監視したい物件IDを列挙するだけで横展開実行されます
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         prop_id: [ "7080", "6940", "5390" ]
 

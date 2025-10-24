@@ -24,7 +24,8 @@ jobs:
         shell: bash
         run: |
           jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          if [[ $jst_hm -ge 0930 && $jst_hm -lt 1900 ]]; then
+          hm=$((10#$jst_hm))                     # ← 10進で評価（先頭0でもOK）
+            if (( hm >= 930 && hm <= 1900 )); then
             echo "inwindow=true"  >> "$GITHUB_OUTPUT"
             echo "JST now: $jst_hm"
           else

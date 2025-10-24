@@ -2,40 +2,46 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # UTC基準。10分おきに起動だけさせる
-  workflow_dispatch: {}       # 手動実行用（任意）
+    # 10分おき（UTC基準）。実行前にJST 09:30–19:00 以外はスキップするゲートを入れているので
+    # ここは広めでOKです。
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
 
 permissions:
-  contents: write             # .state.json を push するため
+  contents: write   # .state-*.json を push するため
 
 concurrency:
-  group: ur-monitor
+  group: ur-monitor-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
   run:
+    # ここがポイント：監視したい物件IDを列挙するだけで横展開実行されます
+    strategy:
+      fail-fast: false
+      matrix:
+        prop_id: [ "7080", "6940", "5390" ]
+
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      # まずは時間帯チェックだけ（checkout不要）
+      - uses: actions/checkout@v4
+
+      # 実行時間帯ゲート（JST 09:30–19:00のみ）
       - name: Window gate (JST 09:30–19:00 only)
         id: gate
         shell: bash
         run: |
           jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          hm=$((10#$jst_hm))                     # ← 10進で評価（先頭0でもOK）
-            if (( hm >= 930 && hm <= 1900 )); then
+          # 1000まで許容：10:00 〜 18:59 を厳密に通し、9:30〜9:59は先行許容、19:00ちょうどは通さない
+          if [[ $jst_hm -ge 0930 && $jst_hm -lt 1900 ]]; then
             echo "inwindow=true"  >> "$GITHUB_OUTPUT"
             echo "JST now: $jst_hm"
           else
             echo "inwindow=false" >> "$GITHUB_OUTPUT"
             echo "skip: out of window (JST $jst_hm)"
           fi
-
-      # ここから先は稼働時間内だけ実行
-      - uses: actions/checkout@v4
-        if: steps.gate.outputs.inwindow == 'true'
 
       - uses: actions/setup-python@v5
         if: steps.gate.outputs.inwindow == 'true'
@@ -48,22 +54,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4
 
-      - name: Run monitor
+      - name: Run monitor (${{ matrix.prop_id }})
         if: steps.gate.outputs.inwindow == 'true'
         env:
+          # ← Python に渡す
+          PROP_ID: ${{ matrix.prop_id }}
+          STATE_FILE: .state-${{ matrix.prop_id }}.json
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
         run: python ur_monitor.py
 
-      - name: Persist state
-        if: steps.gate.outputs.inwindow == 'true' && always()
+      - name: Persist state (${{ matrix.prop_id }})
+        # 失敗時でも状態差分だけは残したいなら `always()` にする
+        if: steps.gate.outputs.inwindow == 'true'
         run: |
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
-          git add .state.json
-          if ! git diff --cached --quiet -- .state.json; then
-            git commit -m "state update"
-            git push
-          else
+          git add .state-${{ matrix.prop_id }}.json || true
+          if git diff --cached --quiet -- .state-${{ matrix.prop_id }}.json; then
             echo "no state changes"
+          else
+            git commit -m "state update (${ {matrix.prop_id} })"
+            git push
           fi

@@ -1,0 +1,54 @@
+name: watchdog
+on:
+  schedule:
+    - cron: "*/5 * * * *"        # 5分おき（UTC）
+  workflow_dispatch: {}           # ←手動テストもできるように
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  ensure-ur-monitor:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 現在がJST 09:30–19:00か判定
+        id: gate
+        run: |
+          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+          if (( 10#$jst_hm < 930 || 10#$jst_hm >= 1900 )); then
+            echo "outside=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 直近の実行時刻を取得（UR Monitor）
+        if: steps.gate.outputs.outside != 'true'
+        id: last
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}
+        run: |
+          wf_file="ur-monitor.yml"  # ←ファイル名が一致していること！
+          last_created_at=$(gh api -H "Accept: application/vnd.github+json" \
+            /repos/${GITHUB_REPOSITORY}/actions/workflows/$wf_file/runs \
+            -f per_page=1 -q '.workflow_runs[0].created_at' || true)
+          echo "last_created_at=$last_created_at"
+
+          # 12分以上空いてたら「穴」と判定
+          if [ -z "$last_created_at" ] || [ "$last_created_at" = "null" ]; then
+            echo "stale=true" >> $GITHUB_OUTPUT
+          else
+            last_ts=$(date -u -d "$last_created_at" +%s)
+            now_ts=$(date -u +%s)
+            [ $last_ts -lt $(( now_ts - 12*60 )) ] && echo "stale=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: バックアップ発火（workflow_dispatch）
+        if: steps.gate.outputs.outside != 'true' && steps.last.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}
+        run: |
+          branch="${GITHUB_REF_NAME:-main}"
+          echo "dispatch ur-monitor on $branch"
+          gh api -X POST \
+            /repos/${GITHUB_REPOSITORY}/actions/workflows/ur-monitor.yml/dispatches \
+            -f ref="$branch" \
+            -f inputs:='{"via":"watchdog"}'

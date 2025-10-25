@@ -87,7 +87,8 @@ FORM_BASE = (
 )
 PAGE_INDEXES = [0, 1, 2]  # extend if pages increase
 
-PROPERTY_LINK = "https://www.ur-net.go.jp/chintai/kanto/tokyo/20_7080.html"
+# 人間向けページのリンクは PROP_ID ベース（7080 のときも 7080 のまま）
+PROPERTY_LINK = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
 STATE_PATH = ".state.json"
 
 # ---------------------- Helpers ----------------------

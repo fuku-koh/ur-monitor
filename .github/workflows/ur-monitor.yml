@@ -2,13 +2,11 @@ name: UR Monitor
 
 on:
   schedule:
-    # 10分おき（UTC基準）。実行前にJST 09:30–19:00 以外はスキップするゲートを入れているので
-    # ここは広めでOKです。
     - cron: "*/10 * * * *"
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # .state-*.json を push するため
+  contents: write
 
 concurrency:
   group: ur-monitor-${{ github.event_name }}
@@ -16,7 +14,6 @@ concurrency:
 
 jobs:
   run:
-    # ここがポイント：監視したい物件IDを列挙するだけで横展開実行されます
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -29,21 +26,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 実行時間帯ゲート（JST 09:30–19:00のみ）
       - name: Window gate (JST 09:30–19:00 only)
         id: gate
         shell: bash
         run: |
-         jst_hm=$(TZ=Asia/Tokyo date +%H%M)   # 例: 0935, 1123
-         # 10#$jst_hm で常に10進として評価。閾値も 930 / 1900 と 0 を付けない
-         if (( 10#$jst_hm >= 930 && 10#$jst_hm < 1900 )); then
-           echo "inwindow=true"  >> "$GITHUB_OUTPUT"
-           echo "JST now: $jst_hm"
-         else
-           echo "inwindow=false" >> "$GITHUB_OUTPUT"
-           echo "skip: out of window (JST $jst_hm)"
-         fi
-
+          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+          if (( 10#$jst_hm >= 930 && 10#$jst_hm < 1900 )); then
+            echo "inwindow=true"  >> "$GITHUB_OUTPUT"
+            echo "JST now: $jst_hm"
+          else
+            echo "inwindow=false" >> "$GITHUB_OUTPUT"
+            echo "skip: out of window (JST $jst_hm)"
+          fi
 
       - uses: actions/setup-python@v5
         if: steps.gate.outputs.inwindow == 'true'
@@ -59,7 +53,6 @@ jobs:
       - name: Run monitor (${{ matrix.prop_id }})
         if: steps.gate.outputs.inwindow == 'true'
         env:
-          # ← Python に渡す
           PROP_ID: ${{ matrix.prop_id }}
           STATE_FILE: .state-${{ matrix.prop_id }}.json
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
@@ -67,15 +60,18 @@ jobs:
         run: python ur_monitor.py
 
       - name: Persist state (${{ matrix.prop_id }})
-        # 失敗時でも状態差分だけは残したいなら `always()` にする
         if: steps.gate.outputs.inwindow == 'true'
+        shell: bash
+        env:
+          PROP_ID: ${{ matrix.prop_id }}
         run: |
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
-          git add .state-${{ matrix.prop_id }}.json || true
-          if git diff --cached --quiet -- .state-${{ matrix.prop_id }}.json; then
+
+          git add ".state-${PROP_ID}.json" || true
+          if git diff --cached --quiet -- ".state-${PROP_ID}.json"; then
             echo "no state changes"
           else
-            git commit -m "state update (${ {matrix.prop_id} })"
+            git commit -m "state update (${PROP_ID})"
             git push
           fi

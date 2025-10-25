@@ -34,15 +34,16 @@ jobs:
         id: gate
         shell: bash
         run: |
-          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          # 1000まで許容：10:00 〜 18:59 を厳密に通し、9:30〜9:59は先行許容、19:00ちょうどは通さない
-          if [[ $jst_hm -ge 0930 && $jst_hm -lt 1900 ]]; then
-            echo "inwindow=true"  >> "$GITHUB_OUTPUT"
-            echo "JST now: $jst_hm"
-          else
-            echo "inwindow=false" >> "$GITHUB_OUTPUT"
-            echo "skip: out of window (JST $jst_hm)"
-          fi
+         jst_hm=$(TZ=Asia/Tokyo date +%H%M)   # 例: 0935, 1123
+         # 10#$jst_hm で常に10進として評価。閾値も 930 / 1900 と 0 を付けない
+         if (( 10#$jst_hm >= 930 && 10#$jst_hm < 1900 )); then
+           echo "inwindow=true"  >> "$GITHUB_OUTPUT"
+           echo "JST now: $jst_hm"
+         else
+           echo "inwindow=false" >> "$GITHUB_OUTPUT"
+           echo "skip: out of window (JST $jst_hm)"
+         fi
+
 
       - uses: actions/setup-python@v5
         if: steps.gate.outputs.inwindow == 'true'

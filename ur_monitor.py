@@ -5,21 +5,24 @@ UR vacancy monitor (GitHub Actions friendly)
 - Notifies via LINE Notify if LINE_NOTIFY_TOKEN is set; otherwise prints to logs.
 """
 
-# ---- config (上部の定数定義付近に置き換え) ----
 # ==== config (物件IDや状態ファイルは可変) ====
 import os, json, re, time, sys
 from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 
-PROP_ID    = os.getenv("PROP_ID", "7080")                 # 例: 7080/5390/6940
-STATE_PATH = os.getenv("STATE_FILE", f".state-{PROP_ID}.json")
+# 先頭付近
+PROP_ID     = os.getenv("PROP_ID", "7080")
+STATE_PATH  = os.getenv("STATE_FILE", ".state.json")
 
 def to_danchi_code(prop_id: str) -> str:
-    # 7080 -> 708 / 5390 -> 539 / その他は prop_id のまま
-    return prop_id[:-1] if (len(prop_id) == 4 and prop_id.endswith("0")) else prop_id
+    override = {
+        "7080": "7080e",  # ← これだけ特殊。ほかはそのまま
+    }
+    return override.get(prop_id, prop_id)
 
 DANCHI = to_danchi_code(PROP_ID)
+PROPERTY_LINK = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
 
 # 人間向けURL（通知に添える）
 URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
@@ -31,13 +34,22 @@ WINDOW_START = (9, 30)   # 09:30 JST
 WINDOW_END   = (18, 59)  # 18:59 JST (inclusive)
 
 # UR API エンドポイント
+# API ①: 団地コード直叩きの最小ペイロード
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 HEADERS = {
-    "Origin":   "https://www.ur-net.go.jp",
-    "Referer":  "https://www.ur-net.go.jp/",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent": "ur-monitor/1.0 (+github-actions)",
+    "Origin":        "https://www.ur-net.go.jp",
+    "Referer":       "https://www.ur-net.go.jp/",
+    "Content-Type":  "application/x-www-form-urlencoded; charset=UTF-8",
+    "User-Agent":    "ur-monitor/1.0 (+github-actions)",
 }
+
+def make_payload(page: int) -> dict:
+    # サーバが受け付ける最小限（indexNo=1始まり）
+    return {
+        "danchiCd": DANCHI,
+        "indexNo":  str(page),  # 1,2,3...
+        "pageSize": "20",
+    }
 
 # API の共通 payload（danchi は必ず可変）
 FORM_BASE = (
@@ -91,9 +103,11 @@ def in_window(now: datetime) -> bool:
 
 def decode_area(s: str) -> str:
     if not s:
-        return s
-    # Replace HTML square meters &#13217; with ㎡
-    return s.replace("&#13217;", "㎡").replace("&amp;#13217;", "㎡")
+        return ""
+    return (s.replace("㎡", "m²")
+             .replace("&sup2;", "²")
+             .replace("m&sup2;", "m²")
+             .replace("\u33a1", "m²"))  # ㎡
 
 def parse_entries(text: str):
     """Parse either JSON or HTML fragment; return list of dict entries."""
@@ -166,25 +180,32 @@ def fetch_page(idx: int):
         raise RuntimeError(f"HTTP {r.status_code} on pageIndex={idx}")
     return parse_entries(r.text)
 
-def fetch_all():
-    items = []
-    for i in (0, 1, 2):
-        try:
-            r = requests.post(
-                "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/",
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                    "Origin": "https://www.ur-net.go.jp",
-                    "Referer": "https://www.ur-net.go.jp/",
-                },
-                data=(
-                    "rent_low=&rent_high=&floorspace_low=&floorspace_high=&"
-                    "shisya=20&danchi=708&shikibetu=0&newBukkenRoom=&"
-                    "orderByField=0&orderBySort=0&pageIndex={}&sp="
-                ).format(i),
-                timeout=15,
-            )
-            r.raise_for_status()
+import time
+import requests
+
+def fetch_all() -> list[dict]:
+    results = []
+    page = 1
+    while page <= 10:  # 念のため安全上限
+        payload = make_payload(page)
+        items = None
+        for attempt in range(3):
+            try:
+                r = requests.post(ENDPOINT, headers=HEADERS, data=payload, timeout=10)
+                r.raise_for_status()
+                items = parse_entries(r.text)  # JSON/HTML両対応の既存関数
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(1 + attempt * 2)
+        if not items:
+            break
+        results.extend(items)
+        if len(items) < 20:  # 1ページ満杯でなければ終端
+            break
+        page += 1
+    return results
 
             # JSONデコード（失敗や想定外の型は安全に中断）
             try:

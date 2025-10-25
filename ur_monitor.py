@@ -5,18 +5,48 @@ UR vacancy monitor (GitHub Actions friendly)
 - Notifies via LINE Notify if LINE_NOTIFY_TOKEN is set; otherwise prints to logs.
 """
 
+# ---- config (上部の定数定義付近に置き換え) ----
 import os, json, re, time, sys
 from datetime import datetime, timezone, timedelta
-
 import requests
 from bs4 import BeautifulSoup
 
-# 物件IDとステートファイル名はワークフローから渡す（デフォルトは既存と互換）
-PROP_ID    = os.getenv("PROP_ID", "7080")
-STATE_PATH = os.getenv("STATE_FILE", ".state.json")
+# 物件IDとステートファイルはワークフローから渡す
+PROP_ID    = os.getenv("PROP_ID", "7080")              # 例: "7080" / "5390" / "6940"
+STATE_PATH = os.getenv("STATE_FILE", ".state.json")    # 例: ".state-7080.json"
 
-# 通知に添える人間向けURLは物件IDで可変にする
+def to_danchi_code(prop_id: str) -> str:
+    # UR の detail API は 7080→"708" のように 3桁を要求する物件が多い
+    # 末尾 0 の4桁なら 末尾を落として3桁化、それ以外はそのまま返す
+    return prop_id[:-1] if len(prop_id) == 4 and prop_id.endswith("0") else prop_id
+
+DANCHI = to_danchi_code(PROP_ID)
+
+# 人間向けページ（通知に添付）
 URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
+
+# Asia/Tokyo
+JST = timezone(timedelta(hours=9))
+WINDOW_START = (9, 30)   # 09:30 JST
+WINDOW_END   = (19, 0)   # 19:00 JST
+
+ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
+HEADERS = {
+    "Origin": "https://www.ur-net.go.jp",
+    "Referer": "https://www.ur-net.go.jp/",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "User-Agent": "ur-monitor/1.0 (+github-actions)"
+}
+
+# ★ここがポイント：danchi を可変化
+FORM_BASE = {
+    "danchi": DANCHI,
+    # 以降は元のまま（DevTools から拾った値を保持）
+    # ...
+}
+
+print(f"[conf] PROP_ID={PROP_ID}, DANCHI={DANCHI}, STATE_PATH={STATE_PATH}")
+
 
 # --- Config ---
 # Asia/Tokyo window

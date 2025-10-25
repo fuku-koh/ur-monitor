@@ -46,6 +46,7 @@ FORM_BASE = (
     "&orderByField=0&orderBy=0&searchIndex=&v=1"
 )
 
+
 print(f"[conf] PROP_ID={PROP_ID} DANCHI={DANCHI} STATE_PATH={STATE_PATH}")
 print(f"[api] fetched rooms: {len(rooms)}  link={PROPERTY_LINK}")
 

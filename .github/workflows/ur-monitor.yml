@@ -24,7 +24,10 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # 履歴を取得しておく（pull --rebase のため）
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Window gate (JST 09:30–19:00 only)
         id: gate
@@ -65,13 +68,30 @@ jobs:
         env:
           PROP_ID: ${{ matrix.prop_id }}
         run: |
+          set -e
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
 
-          git add ".state-${PROP_ID}.json" || true
-          if git diff --cached --quiet -- ".state-${PROP_ID}.json"; then
+          file=".state-${PROP_ID}.json"
+
+          git add "$file" || true
+          if git diff --cached --quiet -- "$file"; then
             echo "no state changes"
-          else
-            git commit -m "state update (${PROP_ID})"
-            git push
+            exit 0
           fi
+
+          # 先にリモート更新を取り込んでから push
+          branch="${GITHUB_REF_NAME:-main}"
+          git fetch origin "$branch"
+          git pull --rebase origin "$branch" || true
+
+          git commit -m "state update (${PROP_ID})" || true
+          if git push origin "HEAD:${branch}"; then
+            exit 0
+          fi
+
+          echo "push rejected; retrying after rebase..."
+          sleep 3
+          git fetch origin "$branch"
+          git pull --rebase origin "$branch" || true
+          git push origin "HEAD:${branch}"

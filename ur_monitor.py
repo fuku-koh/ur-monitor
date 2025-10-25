@@ -6,46 +6,48 @@ UR vacancy monitor (GitHub Actions friendly)
 """
 
 # ---- config (上部の定数定義付近に置き換え) ----
+# ==== config (物件IDや状態ファイルは可変) ====
 import os, json, re, time, sys
 from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
 
-# 物件IDとステートファイルはワークフローから渡す
-PROP_ID    = os.getenv("PROP_ID", "7080")              # 例: "7080" / "5390" / "6940"
-STATE_PATH = os.getenv("STATE_FILE", ".state.json")    # 例: ".state-7080.json"
+PROP_ID    = os.getenv("PROP_ID", "7080")                 # 例: 7080/5390/6940
+STATE_PATH = os.getenv("STATE_FILE", f".state-{PROP_ID}.json")
 
 def to_danchi_code(prop_id: str) -> str:
-    # UR の detail API は 7080→"708" のように 3桁を要求する物件が多い
-    # 末尾 0 の4桁なら 末尾を落として3桁化、それ以外はそのまま返す
-    return prop_id[:-1] if len(prop_id) == 4 and prop_id.endswith("0") else prop_id
+    # 7080 -> 708 / 5390 -> 539 / その他は prop_id のまま
+    return prop_id[:-1] if (len(prop_id) == 4 and prop_id.endswith("0")) else prop_id
 
 DANCHI = to_danchi_code(PROP_ID)
 
-# 人間向けページ（通知に添付）
+# 人間向けURL（通知に添える）
 URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
+PROPERTY_LINK = URL
 
-# Asia/Tokyo
+# JST 窓
 JST = timezone(timedelta(hours=9))
 WINDOW_START = (9, 30)   # 09:30 JST
-WINDOW_END   = (19, 0)   # 19:00 JST
+WINDOW_END   = (18, 59)  # 18:59 JST (inclusive)
 
+# UR API エンドポイント
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 HEADERS = {
-    "Origin": "https://www.ur-net.go.jp",
-    "Referer": "https://www.ur-net.go.jp/",
+    "Origin":   "https://www.ur-net.go.jp",
+    "Referer":  "https://www.ur-net.go.jp/",
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent": "ur-monitor/1.0 (+github-actions)"
+    "User-Agent": "ur-monitor/1.0 (+github-actions)",
 }
 
-# ★ここがポイント：danchi を可変化
-FORM_BASE = {
-    "danchi": DANCHI,
-    # 以降は元のまま（DevTools から拾った値を保持）
-    # ...
-}
+# API の共通 payload（danchi は必ず可変）
+FORM_BASE = (
+    "rent_lower=&rent_upper=&floorspace_low=&floorspace_high="
+    f"&sshisyo=2&danchi={DANCHI}&shikibetu=0&mebukkenBango="
+    "&orderByField=0&orderBy=0&searchIndex=&v=1"
+)
 
-print(f"[conf] PROP_ID={PROP_ID}, DANCHI={DANCHI}, STATE_PATH={STATE_PATH}")
+print(f"[conf] PROP_ID={PROP_ID} DANCHI={DANCHI} STATE_PATH={STATE_PATH}")
+print(f"[api] fetched rooms: {len(rooms)}  link={PROPERTY_LINK}")
 
 
 # --- Config ---

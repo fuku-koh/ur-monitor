@@ -1,9 +1,10 @@
+# .github/workflows/ur-monitor.yml
 name: UR Monitor
 
 on:
   schedule:
-    # :02,12,22,32,42,52 に実行（UTC）…混雑する 00/10/20…を避ける
-    - cron: "2,12,22,32,42,52 * * * *"
+    # :03,13,23,33,43,53（UTC）…JSTでも :03 等。00/10/20混雑帯を避ける
+    - cron: "3-59/10 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -25,7 +26,6 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      # 履歴を取得しておく（pull --rebase のため）
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -35,12 +35,11 @@ jobs:
         shell: bash
         run: |
           jst_hm=$(TZ=Asia/Tokyo date +%H%M)
+          echo "JST now: $jst_hm"
           if (( 10#$jst_hm >= 930 && 10#$jst_hm < 1900 )); then
             echo "inwindow=true"  >> "$GITHUB_OUTPUT"
-            echo "JST now: $jst_hm"
           else
             echo "inwindow=false" >> "$GITHUB_OUTPUT"
-            echo "skip: out of window (JST $jst_hm)"
           fi
 
       - uses: actions/setup-python@v5
@@ -73,26 +72,15 @@ jobs:
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
 
-          file=".state-${PROP_ID}.json"
-
-          git add "$file" || true
-          if git diff --cached --quiet -- "$file"; then
+          f=".state-${PROP_ID}.json"
+          git add "$f" || true
+          if git diff --cached --quiet -- "$f"; then
             echo "no state changes"
             exit 0
           fi
 
-          # 先にリモート更新を取り込んでから push
           branch="${GITHUB_REF_NAME:-main}"
           git fetch origin "$branch"
           git pull --rebase origin "$branch" || true
-
           git commit -m "state update (${PROP_ID})" || true
-          if git push origin "HEAD:${branch}"; then
-            exit 0
-          fi
-
-          echo "push rejected; retrying after rebase..."
-          sleep 3
-          git fetch origin "$branch"
-          git pull --rebase origin "$branch" || true
           git push origin "HEAD:${branch}"

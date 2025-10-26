@@ -2,14 +2,15 @@ name: UR Monitor
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # :02,12,22,32,42,52 に実行（UTC）…混雑する 00/10/20…を避ける
+    - cron: "2,12,22,32,42,52 * * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 concurrency:
-  group: ur-monitor-${{ github.event_name }}
+  group: ur-${{ github.workflow }}
   cancel-in-progress: true
 
 jobs:

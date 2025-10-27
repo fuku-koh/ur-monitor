@@ -232,6 +232,22 @@ def main():
     prev, is_init = load_state()
     rooms = fetch_all()
     current = set(canonicalize(rooms))
+   
+    if is_init:
+        notify(f"[UR監視 初期化] 件数: {len(current)}\n{URL}")
+    elif current != prev:
+        added   = current - prev
+        removed = prev - current
+        lines = []
+        if added:
+            lines.append("+ " + " / ".join([a[0] for a in sorted(added)][:5]))
+        if removed:
+            lines.append("− " + " / ".join([a[0] for a in sorted(removed)][:5]))
+        notify("【UR監視 変化あり】\n" + ("\n".join(lines) if lines else "差分あり") + f"\n{URL}")
+    else:
+        print("no_change")
+
+    save_state(current)
 
 if __name__ == "__main__":
     main()

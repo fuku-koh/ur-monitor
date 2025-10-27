@@ -61,13 +61,14 @@ jobs:
             echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
 
+        # バックアップ発火 step だけ差し替え
       - name: バックアップ発火（workflow_dispatch）
         if: steps.gate.outputs.outside != 'true' && steps.last.outputs.stale == 'true'
         env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}
+         GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}
         shell: bash
         run: |
-          branch="${GITHUB_REF_NAME:-main}"
+          branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo "main")
           echo "dispatch ur-monitor on $branch"
           gh api -X POST \
             /repos/${GITHUB_REPOSITORY}/actions/workflows/ur-monitor.yml/dispatches \

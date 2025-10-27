@@ -199,15 +199,32 @@ def notify(msg: str):
         print(msg)
 
 # -------- Main --------
-now = datetime.now(JST)
-if now.hour == 9 and now.minute < 40:  # 9:30〜9:39 帯の最初の1回だけ通知
+# 先頭の「now = datetime.now(JST) ... notify(...)」ブロックは削除
+
+HB_FILE = ".hb-date.txt"
+
+def _hb_sent_today(now) -> bool:
     try:
-        notify(f"[UR監視 起動ハートビート] JST {now:%H:%M} / {URL}")
+        with open(HB_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip() == now.strftime("%Y%m%d")
     except Exception:
-        pass
+        return False
+
+def _hb_mark(now) -> None:
+    with open(HB_FILE, "w", encoding="utf-8") as f:
+        f.write(now.strftime("%Y%m%d"))
 
 def main():
     now = datetime.now(JST)
+
+    # 9:30〜9:39 の間、かつ今日まだ送っていなければ一度だけ送る
+    if now.hour == 9 and 30 <= now.minute < 40 and not _hb_sent_today(now):
+        try:
+            notify(f"[UR監視 起動ハートビート] JST {now:%H:%M} / {URL}")
+            _hb_mark(now)
+        except Exception:
+            pass
+
     if not in_window(now):
         print("skip_out_of_window")
         return
@@ -215,22 +232,6 @@ def main():
     prev, is_init = load_state()
     rooms = fetch_all()
     current = set(canonicalize(rooms))
-
-    if is_init:
-        notify(f"[UR監視 初期化] 件数: {len(current)}\n{URL}")
-    elif current != prev:
-        added   = current - prev
-        removed = prev - current
-        lines = []
-        if added:
-            lines.append("+ " + " / ".join([a[0] for a in sorted(added)][:5]))
-        if removed:
-            lines.append("− " + " / ".join([a[0] for a in sorted(removed)][:5]))
-        notify("【UR監視 変化あり】\n" + ("\n".join(lines) if lines else "差分あり") + f"\n{URL}")
-    else:
-        print("no_change")
-
-    save_state(current)
 
 if __name__ == "__main__":
     main()

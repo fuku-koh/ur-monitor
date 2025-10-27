@@ -31,11 +31,13 @@ WINDOW_END   = (18, 59)
 # UR の内部API（POST）
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 HEADERS = {
-    "Origin":       "https://www.ur-net.go.jp",
-    "Referer":      "https://www.ur-net.go.jp/",
+    "Origin": "https://www.ur-net.go.jp",
+    "Referer": URL,  # ← f"...20_{PROP_ID}.html"
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent":   "ur-monitor/1.0 (+github-actions)",
+    "User-Agent": "ur-monitor/1.0 (+github-actions)",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
 }
+
 
 def make_payload(page: int) -> dict:
     """APIが受け付ける最小のペイロード。indexNo は 1 始まり。"""

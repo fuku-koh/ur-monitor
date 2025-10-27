@@ -198,9 +198,7 @@ def notify(msg: str):
         print(f"notify_failed: {e}")
         print(msg)
 
-# -------- Main --------
-# 先頭の「now = datetime.now(JST) ... notify(...)」ブロックは削除
-
+# -------- Heartbeat state --------
 HB_FILE = ".hb-date.txt"
 
 def _hb_sent_today(now) -> bool:
@@ -214,6 +212,7 @@ def _hb_mark(now) -> None:
     with open(HB_FILE, "w", encoding="utf-8") as f:
         f.write(now.strftime("%Y%m%d"))
 
+# -------- Main --------
 def main():
     now = datetime.now(JST)
 
@@ -232,7 +231,7 @@ def main():
     prev, is_init = load_state()
     rooms = fetch_all()
     current = set(canonicalize(rooms))
-   
+
     if is_init:
         notify(f"[UR監視 初期化] 件数: {len(current)}\n{URL}")
     elif current != prev:
@@ -251,18 +250,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    if is_init:
-        notify(f"[UR監視 初期化] 件数: {len(current)}\n{URL}")
-    elif current != prev:
-        added   = current - prev
-        removed = prev - current
-        lines = []
-        if added:
-            lines.append("+ " + " / ".join([a[0] for a in sorted(added)][:5]))
-        if removed:
-            lines.append("− " + " / ".join([a[0] for a in sorted(removed)][:5]))
-        notify("【UR監視 変化あり】\n" + ("\n".join(lines) if lines else "差分あり") + f"\n{URL}")
-    else:
-        print("no_change")
-
-    save_state(current)

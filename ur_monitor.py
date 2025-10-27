@@ -199,6 +199,13 @@ def notify(msg: str):
         print(msg)
 
 # -------- Main --------
+now = datetime.now(JST)
+if now.hour == 9 and now.minute < 40:  # 9:30〜9:39 帯の最初の1回だけ通知
+    try:
+        notify(f"[UR監視 起動ハートビート] JST {now:%H:%M} / {URL}")
+    except Exception:
+        pass
+
 def main():
     now = datetime.now(JST)
     if not in_window(now):

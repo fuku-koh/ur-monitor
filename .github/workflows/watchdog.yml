@@ -2,14 +2,13 @@ name: watchdog
 
 on:
   schedule:
-    # :01,06,11,16,21,26,31,36,41,46,51,56（UTC）
-    # ※ 00/05/10…の混雑を避ける
+    # :01,06,11,16,21,26,31,36,41,46,51,56（UTC）…混雑:00/05/10/…を避ける
     - cron: "1-59/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
   contents: read
-  actions: read   # dispatch は PAT で行うので read で十分
+  actions: write   # ← dispatch するので write 必須
 
 jobs:
   ensure-ur-monitor:
@@ -31,38 +30,42 @@ jobs:
         if: steps.gate.outputs.outside != 'true'
         id: last
         env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}   # repo+workflow 付与済みのPAT
+          GH_TOKEN: ${{ github.token }}  # ← PAT不要
         shell: bash
         run: |
           set -euo pipefail
           sleep $((RANDOM % 15))  # 競合ジッタ
 
           repo="${GITHUB_REPOSITORY}"
-          wf_path=".github/workflows/ur-monitor.yml"
+          wf_path=".github/workflows/ur-monitor.yml"  # 実際のファイル名に合わせること
 
-          # ファイルパスで workflow ID を取得
+          # workflow ID をパスで取得（404等は stale 扱い）
           wf_id=$(gh api /repos/$repo/actions/workflows --jq \
-                  ".workflows[] | select(.path==\"$wf_path\").id" || true)
+                   ".workflows[] | select(.path==\"$wf_path\").id" 2>/dev/null || true)
           if [ -z "${wf_id:-}" ]; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "wf_id missing -> stale"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          # cancel/skip を除外。完了(success/failure)ランの updated_at を取る
+          # completed(success/failure) の最新ランの updated_at を見る
           last_good=$(gh api /repos/$repo/actions/workflows/$wf_id/runs \
-                       -f per_page=25 --jq '
-                         .workflow_runs
-                         | map(select(.status=="completed"
-                                      and (.conclusion=="success" or .conclusion=="failure")))
-                         | .[0].updated_at // empty')
+                       -f per_page=50 \
+                       --jq '[.workflow_runs[]
+                              | select(.status=="completed"
+                                       and (.conclusion=="success" or .conclusion=="failure"))]
+                             | .[0].updated_at' 2>/dev/null || true)
           echo "last_good=${last_good:-<none>}"
 
+          # 値が取れない・パース不可は stale
           if [ -z "${last_good:-}" ] || ! date -u -d "$last_good" >/dev/null 2>&1; then
-            echo "stale=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           last_ts=$(date -u -d "$last_good" +%s)
           now_ts=$(date -u +%s)
-          # しきい値：12分（好みで 10〜15 に調整）
+          # 12分以上空いていたら穴
           if [ $last_ts -lt $(( now_ts - 12*60 )) ]; then
             echo "stale=true" >> "$GITHUB_OUTPUT"
           fi
@@ -70,10 +73,9 @@ jobs:
       - name: バックアップ発火（workflow_dispatch）
         if: steps.gate.outputs.outside != 'true' && steps.last.outputs.stale == 'true'
         env:
-          GH_TOKEN: ${{ secrets.PAT_WORKFLOW }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          # 既定ブランチを API から取得（main 固定を避ける）
           branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || echo "main")
           echo "dispatch ur-monitor on $branch"
           gh api -X POST \

@@ -224,6 +224,102 @@ def _pick_listing_iframe(soup: BeautifulSoup, base_url: str) -> str | None:
         return None
     cands.sort(reverse=True)  # スコア高い順
     return cands[0][1]
+
+# 追加：HTML取得用ヘッダ（POST用の Content-Type は外す）
+HEADERS_HTML = {k: v for k, v in HEADERS.items() if k.lower() != "content-type"}
+HEADERS_HTML["Accept"] = "text/html, */*;q=0.8"
+
+from urllib.parse import urljoin  # ← import も忘れず追加
+
+def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> list[str]:
+    """
+    物件の外枠ページから、実際の一覧が出る iframe / 直リンク候補URLをかき集める。
+    - <iframe src=...>（GTMは除外）
+    - <a href=...>（list/ichiran/iframe/embed/room を含むもの優先）
+    - <script> 内に直書きされた URL も拾う
+    すべて絶対URLに正規化して返す。
+    """
+    urls: set[str] = set()
+
+    # 1) iframe
+    for ifr in soup.find_all("iframe", src=True):
+        src = (ifr.get("src") or "").strip()
+        if not src:
+            continue
+        if "googletagmanager" in src:  # GTM は無視
+            continue
+        urls.add(urljoin(base_url, src))
+
+    # 2) アンカー
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        # 一覧っぽいものだけ追加（ノイズを減らす）
+        if any(key in href for key in ("iframe", "embed", "ichiran", "list", "room", "bukken")):
+            urls.add(urljoin(base_url, href))
+
+    # 3) スクリプト内のURL
+    for s in soup.find_all("script"):
+        txt = s.string or s.get_text() or ""
+        if not txt:
+            continue
+        # 文字列リテラルの http(s)://... をざっくり拾う
+        for m in re.finditer(r"""['"](https?://[^'"]+)['"]""", txt):
+            u = m.group(1)
+            if "googletagmanager" in u:
+                continue
+            urls.add(u)
+        # src="..." 形式も拾う（相対→絶対）
+        for m in re.finditer(r"""src\s*=\s*['"]([^'"]+)['"]""", txt):
+            urls.add(urljoin(base_url, m.group(1)))
+
+    return list(urls)
+
+def fetch_public_via_embed() -> list[dict]:
+    """
+    公開ページ(物件トップ: URL)から実一覧の iframe / 直リンクを探しにいき、
+    最初に部屋が取れたページの HTML を parse_entries() で吸い上げて返す。
+    """
+    try:
+        r0 = requests.get(URL, headers=HEADERS_HTML, timeout=15)
+        r0.raise_for_status()
+    except Exception as e:
+        print(f"[fetch] outer get failed: {e}")
+        return []
+
+    soup = BeautifulSoup(r0.text, "html.parser")
+    cands = _collect_candidate_urls(r0.text, soup, URL)
+
+    # 候補が多いときに一覧っぽいURLを優先的に
+    def _score(u: str) -> int:
+        u2 = u.lower()
+        score = 0
+        for kw in ("ichiran", "list", "iframe", "embed", "room", "bukken"):
+            if kw in u2:
+                score += 1
+        return -score  # sort で昇順→スコア大が先頭になるようにマイナス
+
+    for u in sorted(cands, key=_score):
+        try:
+            # GTMなどを念のため除外
+            if "googletagmanager" in u:
+                continue
+            r = requests.get(u, headers=HEADERS_HTML, timeout=15)
+            if r.status_code != 200:
+                continue
+            items = parse_entries(r.text)
+            n = len(items) if items else 0
+            print(f"[fetch] iframe {u} -> {n} rooms")
+            if items:
+                return items
+        except Exception as e:
+            print(f"[fetch] iframe get failed {u}: {e}")
+
+    print("[fetch] listing iframe not found on outer page")
+    return []
+
+
 def fetch_public_via_embed() -> list[dict]:
     out: list[dict] = []
 

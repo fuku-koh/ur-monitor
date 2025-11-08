@@ -294,7 +294,7 @@ def fetch_all() -> list[dict]:
         return rooms
 
     # 2) 正しい listing iframe を選別して取得（今回の修正）
-    rooms = fetch_public_via_iframe()
+    rooms = fetch_public_via_embed()
     if rooms:
         return rooms
 

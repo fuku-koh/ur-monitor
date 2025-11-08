@@ -2,7 +2,7 @@
 """
 UR vacancy monitor (GitHub Actions friendly)
 - Polls the UR internal endpoint via POST (no JS) and detects diffs.
-- Notifies via LINE/ChatWork; otherwise prints to logs.
+- Notifies via ChatWork (optional); otherwise prints to logs.
 """
 
 import os, json, re, time
@@ -15,10 +15,11 @@ PROP_ID    = os.getenv("PROP_ID", "7080")
 STATE_PATH = os.getenv("STATE_FILE", ".state.json")
 
 def to_danchi_code(prop_id: str) -> str:
-    # 7080 だけ "7080e" になる（他はそのまま）
+    # 7080 だけ "7080e"（他はそのまま）
     return {"7080": "7080e"}.get(prop_id, prop_id)
 
 DANCHI = to_danchi_code(PROP_ID)
+DANCHI_SHORT = PROP_ID[:3]  # 旧フォームAPIは3桁団地番号（7080 -> "708"）
 
 # 人間向けURL（通知に載せる）
 URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
@@ -32,15 +33,22 @@ WINDOW_END   = (18, 59)
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 HEADERS = {
     "Origin": "https://www.ur-net.go.jp",
-    "Referer": URL,  # ← f"...20_{PROP_ID}.html"
+    "Referer": URL,  # f"...20_{PROP_ID}.html"
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "ur-monitor/1.0 (+github-actions)",
     "Accept": "application/json, text/javascript, */*; q=0.01",
+    # "Accept-Language": "ja-JP,ja;q=0.9",  # 必要なら有効化
 }
 
+# 旧フォームAPIのベース（pageIndex 0始まり）
+FORM_BASE = (
+    "rent_low=&rent_high=&floorspace_low=&floorspace_high="
+    f"&shisya=20&danchi={DANCHI_SHORT}&shikibetu=0&newBukkenRoom="
+    "&orderByField=0&orderBySort=0&pageIndex={{idx}}&sp="
+)
 
 def make_payload(page: int) -> dict:
-    """APIが受け付ける最小のペイロード。indexNo は 1 始まり。"""
+    """（参考）方式①用の最小ペイロード。indexNo は 1 始まり。"""
     return {"danchiCd": DANCHI, "indexNo": str(page), "pageSize": "20"}
 
 # -------- Helpers --------
@@ -89,7 +97,7 @@ def parse_entries(text: str):
             })
         return rooms
 
-    # 2) 念のためHTML断片もパース
+    # 2) HTML断片パース（最終手段にも使う）
     soup = BeautifulSoup(text, "html.parser")
     for c in soup.select(".room, .roomCard, .list, .table, tr, li"):
         txt = c.get_text(" ", strip=True)
@@ -118,32 +126,80 @@ def parse_entries(text: str):
             })
     return rooms
 
-def fetch_all() -> list[dict]:
-    """ページングしながら全件取得。エラー時は最大3回リトライ。"""
-    out: list[dict] = []
-    page = 1
-    while page <= 10:  # 安全上限
-        payload = make_payload(page)
-        text = None
-        for attempt in range(3):
-            try:
-                r = requests.post(ENDPOINT, headers=HEADERS, data=payload, timeout=10)
-                r.raise_for_status()
-                text = r.text
-                break
-            except Exception:
-                if attempt == 2:
-                    raise
-                time.sleep(1 + attempt * 2)
+# ---- HTTP ヘルパー & 3系統フェッチ ----
+def _post(url: str, data: dict | str, timeout: int = 10) -> str:
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=HEADERS, data=data, timeout=timeout)
+            r.raise_for_status()
+            return r.text
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(1 + attempt * 2)
+
+# 方式①: danchiCd / indexNo=1..（今までのやり方）
+def fetch_api_danchiCd() -> list[dict]:
+    out, page = [], 1
+    while page <= 10:
+        text = _post(ENDPOINT, {"danchiCd": DANCHI, "indexNo": str(page), "pageSize": "20"})
         items = parse_entries(text or "")
         if not items:
             break
         out.extend(items)
-        if len(items) < 20:       # 1ページ満杯でなければ終端
+        if len(items) < 20:
             break
         page += 1
     return out
 
+# 方式②: 旧フォーム / pageIndex=0..（ここにだけ出ることがある）
+def fetch_api_form() -> list[dict]:
+    out, page = [], 0
+    while page <= 10:
+        text = _post(ENDPOINT, FORM_BASE.format(idx=page))
+        items = parse_entries(text or "")
+        if not items:
+            break
+        out.extend(items)
+        if len(items) < 20:
+            break
+        page += 1
+    return out
+
+# バックアップ: 人向けHTMLを直接パース
+def fetch_from_html() -> list[dict]:
+    try:
+        r = requests.get(
+            URL,
+            headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Referer": "https://www.ur-net.go.jp/",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        return parse_entries(r.text)
+    except Exception:
+        return []
+
+def fetch_all() -> list[dict]:
+    # ① まず danchiCd 系
+    a = fetch_api_danchiCd()
+    if a:
+        print(f"[fetch] danchiCd={DANCHI} -> {len(a)} rooms")
+        return a
+    # ② ダメなら 旧フォーム
+    b = fetch_api_form()
+    if b:
+        print(f"[fetch] form danchi={DANCHI_SHORT} -> {len(b)} rooms")
+        return b
+    # ③ 最後の砦: HTML
+    c = fetch_from_html()
+    print(f"[fetch] html fallback -> {len(c)} rooms")
+    return c
+
+# -------- Diff helpers / state / notify --------
 def canonicalize(rooms):
     """差分比較用に正規化してタプル集合へ。"""
     canon = []

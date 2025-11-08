@@ -12,6 +12,26 @@ from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
+# --- debug dump ---
+DEBUG = os.getenv("DEBUG", "0") == "1"
+DBG_DIR = os.getenv("DEBUG_DIR", ".debug")
+
+def _dump(name: str, text: str, binary: bool = False):
+    if not DEBUG:
+        return
+    try:
+        os.makedirs(DBG_DIR, exist_ok=True)
+        path = os.path.join(DBG_DIR, name)
+        if binary:
+            with open(path, "wb") as f:
+                f.write(text)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+    except Exception as e:
+        print(f"[debug] dump failed {name}: {e}")
+
+
 # -------- Config --------
 PROP_ID    = os.getenv("PROP_ID", "7080")
 STATE_PATH = os.getenv("STATE_FILE", ".state.json")
@@ -171,6 +191,7 @@ def _set_query(url: str, **kv) -> str:
     new_q = urlencode({k: v[-1] for k, v in q.items()})
     return urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
 
+
 def _pick_listing_iframe(soup: BeautifulSoup, base_url: str) -> str | None:
     """
     外側ページに複数 iframe があるので、物件リストっぽいものだけ選ぶ。
@@ -203,56 +224,52 @@ def _pick_listing_iframe(soup: BeautifulSoup, base_url: str) -> str | None:
         return None
     cands.sort(reverse=True)  # スコア高い順
     return cands[0][1]
-
-def fetch_public_via_iframe() -> list[dict]:
-    """外側ページ→正しい listing iframe を選んで取得。簡易ページングにも対応。"""
+def fetch_public_via_embed() -> list[dict]:
     out: list[dict] = []
 
     r0 = requests.get(URL, headers=PUB_HEADERS, timeout=15)
     r0.raise_for_status()
+    _dump("outer.html", r0.text)  # ←外側ページ保存
     soup = BeautifulSoup(r0.text, "html.parser")
 
-    target = _pick_listing_iframe(soup, URL)
-    if not target:
-        print("[fetch] listing iframe not found on outer page")
+    cands = _collect_candidate_urls(r0.text, soup, URL)
+    _dump("candidates.txt", "\n".join(cands))  # ←候補URL一覧
+    print(f"[fetch] outer candidates = {len(cands)}")
+    if not cands:
+        print("[fetch] listing URL not found on outer page")
         return out
 
-    print(f"[fetch] iframe listing {target}")
-
-    # まずはそのまま
-    try:
-        r = requests.get(target, headers=PUB_HEADERS, timeout=15)
-        r.raise_for_status()
-        items = parse_entries(r.text)
-        print(f"[fetch] public page raw -> {len(items)} rooms")
-        out.extend(items)
-        # 1ページで十分な件数なら終了
-        if items and len(items) < 20:
-            return out
-    except Exception as e:
-        print(f"[fetch] iframe fetch error: {e}")
-
-    # 簡易ページング（0/1/2… を複数キーで試す。最大5ページ）
-    keys = ("pageIndex", "idx", "page")
-    seen = set()
-    for key in keys:
-        for i in range(5):
-            u = _set_query(target, **{key: i})
-            if u in seen:
-                continue
-            seen.add(u)
-            try:
-                ri = requests.get(u, headers=PUB_HEADERS, timeout=15)
-                ri.raise_for_status()
-                items = parse_entries(ri.text)
-                print(f"[fetch] public {key}={i} -> {len(items)} rooms")
-                if items:
-                    out.extend(items)
-                    if len(items) < 20:
-                        return out
-            except Exception as e:
-                print(f"[fetch] iframe page error {key}={i}: {e}")
+    tried = 0
+    for cand in cands[:6]:
+        tried += 1
+        try:
+            r = requests.get(cand, headers=PUB_HEADERS, timeout=15)
+            r.raise_for_status()
+            _dump(f"try{tried}.url.txt", cand)
+            _dump(f"try{tried}.html", r.text)   # ←各候補の生HTML
+            items = parse_entries(r.text)
+            print(f"[fetch] try#{tried} {cand} -> {len(items)} rooms")
+            if items:
+                out.extend(items)
+                # 簡易ページング
+                for key in ("pageIndex", "idx", "page"):
+                    for i in range(1, 5):
+                        u = _set_query(cand, **{key: i})
+                        ri = requests.get(u, headers=PUB_HEADERS, timeout=15)
+                        if ri.status_code != 200:
+                            break
+                        _dump(f"try{tried}.{key}={i}.html", ri.text)
+                        more = parse_entries(ri.text)
+                        print(f"[fetch] {key}={i} -> {len(more)} rooms")
+                        if not more:
+                            break
+                        out.extend(more)
+                        if len(more) < 20:
+                            break
                 break
+        except Exception as e:
+            print(f"[fetch] embed fetch error {cand}: {e}")
+            continue
 
     return out
 
@@ -380,6 +397,13 @@ def main():
     prev, is_init = load_state()
     rooms = fetch_all()
     current = set(canonicalize(rooms))
+
+    # スナップショット
+    try:
+        _dump("rooms.json", json.dumps(rooms, ensure_ascii=False, indent=2))
+        _dump("canon.json", json.dumps(sorted(list(current)), ensure_ascii=False, indent=2))
+    except Exception:
+        pass
 
     if is_init:
         notify(f"[UR監視 初期化] 件数: {len(current)}\n{URL}")

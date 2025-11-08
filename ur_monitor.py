@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 UR vacancy monitor (GitHub Actions friendly)
-- Try internal API first; if it fails or returns 0, scrape the public property page.
+- Try internal API first; if it fails/empty, scrape the public property page.
+- Public page fallback is iframe-aware.
 - Notifies via ChatWork (if env set); otherwise prints to logs.
 """
 
@@ -9,6 +10,7 @@ import os, json, re, time
 from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # -------- Config --------
 PROP_ID    = os.getenv("PROP_ID", "7080")
@@ -32,11 +34,11 @@ WINDOW_END   = (18, 59)
 API_ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 API_HEADERS = {
     "Origin": "https://www.ur-net.go.jp",
-    "Referer": URL,  # f"...20_{PROP_ID}.html"
+    "Referer": URL,
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "Mozilla/5.0 ur-monitor (+github-actions)",
     "Accept": "application/json, text/javascript, */*; q=0.01",
-    "X-Requested-With": "XMLHttpRequest",  # JSONを返す振る舞いを促す
+    "X-Requested-With": "XMLHttpRequest",
 }
 PAGE_HEADERS = {
     "User-Agent": "Mozilla/5.0 ur-monitor (+github-actions)",
@@ -92,6 +94,7 @@ def parse_api_text(text: str):
         })
     return rooms
 
+# 表解析（公開ページ/iframe 共通）
 _room_name_re = re.compile(r"(\d{2,4})号室")
 _layout_re    = re.compile(r"(?:[1-4]LDK|[1-4]DK|[1-4]K|ワンルーム)")
 _area_re      = re.compile(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)")
@@ -99,52 +102,57 @@ _floor_re     = re.compile(r"(\d+)\s*階")
 _rent_re      = re.compile(r"([\d,]+)\s*円")
 _comm_re      = re.compile(r"共益?費.*?([\d,]+)\s*円|\(([\d,]+)\s*円\)")
 
-def parse_public_html(html: str):
-    """物件の公開ページの表から部屋情報を抽出。"""
+def parse_table_html(html: str):
     soup = BeautifulSoup(html, "html.parser")
     rooms = []
-    # 表形式の行を総当たりでみる（サイト側のclass変化に強めに）
-    for tr in soup.select("table tr"):
-        txt = tr.get_text(" ", strip=True)
-        if not txt: continue
 
-        m_name  = _room_name_re.search(txt)
-        if not m_name:
-            continue  # 見出し行などはスキップ
+    # なるべく範囲を絞る：表の候補だけ見る
+    tables = soup.select("table")
+    if not tables:
+        tables = [soup]  # 最悪全体から拾う
 
-        m_layout = _layout_re.search(txt)
-        m_area   = _area_re.search(txt)
-        m_floor  = _floor_re.search(txt)
-        # 家賃は太字+別カラムのことが多いので td を個別に見るとより確実
-        rent_txt = ""
-        tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-        for t in tds:
-            m = _rent_re.search(t)
-            if m:
-                rent_txt = m.group(1) + "円"; break
-        if not rent_txt:
-            m = _rent_re.search(txt)
-            rent_txt = m.group(1) + "円" if m else ""
+    for scope in tables:
+        for tr in scope.select("tr"):
+            txt = tr.get_text(" ", strip=True)
+            if not txt:
+                continue
+            m_name  = _room_name_re.search(txt)
+            if not m_name:
+                continue
 
-        # 共益費（カラムか括弧内）
-        comm_txt = ""
-        for t in tds:
-            m = _comm_re.search(t)
-            if m:
-                comm_txt = (m.group(1) or m.group(2)) + "円"; break
-        if not comm_txt:
-            m = _comm_re.search(txt)
-            if m: comm_txt = (m.group(1) or m.group(2)) + "円"
+            tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            # 家賃（カラム優先）
+            rent_txt = ""
+            for t in tds:
+                m = _rent_re.search(t)
+                if m: rent_txt = m.group(1) + "円"; break
+            if not rent_txt:
+                m = _rent_re.search(txt)
+                rent_txt = m.group(1) + "円" if m else ""
 
-        rooms.append({
-            "id": "",
-            "name": m_name.group(1) + "号室",
-            "type": m_layout.group(0) if m_layout else "",
-            "floorspace": (m_area.group(1) + "㎡") if m_area else "",
-            "floor": (m_floor.group(1) + "階") if m_floor else "",
-            "rent": rent_txt,
-            "commonfee": comm_txt,
-        })
+            # 共益費
+            comm_txt = ""
+            for t in tds:
+                m = _comm_re.search(t)
+                if m:
+                    comm_txt = (m.group(1) or m.group(2)) + "円"; break
+            if not comm_txt:
+                m = _comm_re.search(txt)
+                if m: comm_txt = (m.group(1) or m.group(2)) + "円"
+
+            m_layout = _layout_re.search(txt)
+            m_area   = _area_re.search(txt)
+            m_floor  = _floor_re.search(txt)
+
+            rooms.append({
+                "id": "",
+                "name": m_name.group(1) + "号室",
+                "type": m_layout.group(0) if m_layout else "",
+                "floorspace": (m_area.group(1) + "㎡") if m_area else "",
+                "floor": (m_floor.group(1) + "階") if m_floor else "",
+                "rent": rent_txt,
+                "commonfee": comm_txt,
+            })
     return rooms
 
 # -------- Fetchers --------
@@ -166,26 +174,59 @@ def fetch_from_api():
 
         items = parse_api_text(r.text)
         if items is None:
-            # JSON ではなかった（403等でHTMLなど）
             print(f"[fetch] api returned non-JSON page={page}")
             return None
 
         results.extend(items)
-        if len(items) < 20:  # 1ページ満杯でなければ終端
+        if len(items) < 20:
             break
         page += 1
     return results
 
 def fetch_from_public():
+    # 1) 物件ページ本体
     try:
         r = requests.get(URL, headers=PAGE_HEADERS, timeout=12)
         r.raise_for_status()
     except Exception as e:
         print(f"[fetch] public page error: {e}")
         return []
-    rooms = parse_public_html(r.text)
-    print(f"[fetch] public page -> {len(rooms)} rooms")
-    return rooms
+
+    rooms = parse_table_html(r.text)
+    if rooms:
+        print(f"[fetch] public page -> {len(rooms)} rooms")
+        return rooms
+
+    # 2) 表が iframe 内のケースを辿る
+    soup = BeautifulSoup(r.text, "html.parser")
+    # 表示用っぽい iframe を探す（danchi / bukken / result などをヒントに）
+    candidates = []
+    for ifr in soup.select("iframe[src]"):
+        src = ifr.get("src", "")
+        if any(k in src for k in ("danchi", "bukken", "result", "room", "list")):
+            candidates.append(src)
+    # 見つからなくても全 iframe を最後に試す
+    if not candidates:
+        candidates = [ifr.get("src", "") for ifr in soup.select("iframe[src]")]
+
+    base = URL
+    for src in candidates:
+        if not src: 
+            continue
+        iframe_url = urljoin(base, src)
+        try:
+            r2 = requests.get(iframe_url, headers=PAGE_HEADERS, timeout=12)
+            r2.raise_for_status()
+        except Exception as e:
+            print(f"[fetch] iframe get failed {iframe_url}: {e}")
+            continue
+        rooms = parse_table_html(r2.text)
+        if rooms:
+            print(f"[fetch] iframe({iframe_url}) -> {len(rooms)} rooms")
+            return rooms
+
+    print("[fetch] html fallback -> 0 rooms")
+    return []
 
 def fetch_all():
     # 1) まずAPI
@@ -193,8 +234,7 @@ def fetch_all():
     if api_rooms:
         print(f"[fetch] api -> {len(api_rooms)} rooms")
         return api_rooms
-
-    # 2) ダメなら公開ページをスクレイプ
+    # 2) ダメなら公開ページ（iframe対応）
     return fetch_from_public()
 
 # -------- Diff helpers --------

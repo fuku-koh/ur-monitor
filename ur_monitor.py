@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 UR vacancy monitor (GitHub Actions friendly)
-- Try internal API (v1) with cookies; if fail/empty, try legacy form API (v2),
-  then scrape public page (iframe-aware).
-- Notifies via ChatWork if env set; otherwise prints logs.
+- Polls UR endpoints and the public iframe listing; detects diffs.
+- Notifies via ChatWork (fallback: print).
 """
+
 import os, json, re, time
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin
-
+from urllib.parse import urljoin, urlencode, urlparse, parse_qs, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
@@ -17,12 +16,12 @@ PROP_ID    = os.getenv("PROP_ID", "7080")
 STATE_PATH = os.getenv("STATE_FILE", ".state.json")
 
 def to_danchi_code(prop_id: str) -> str:
-    # 7080 だけ "7080e"（他はそのまま）
+    # 7080 だけ "7080e"
     return {"7080": "7080e"}.get(prop_id, prop_id)
 
-DANCHI  = to_danchi_code(PROP_ID)  # 例: "7080e"
-DANCHI3 = PROP_ID[:3]              # 例: "708"（旧APIで必要）
+DANCHI = to_danchi_code(PROP_ID)
 
+# 人間向けURL（通知に載せる）
 URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
 
 # 監視時間（JST 09:30〜19:00）
@@ -30,248 +29,232 @@ JST = timezone(timedelta(hours=9))
 WINDOW_START = (9, 30)
 WINDOW_END   = (18, 59)
 
-# -------- HTTP headers / endpoints --------
-API_V1 = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
-API_V1_HEADERS = {
+# 内部API（通れば使う / ダメなら無視）
+API_ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
+API_HEADERS = {
     "Origin": "https://www.ur-net.go.jp",
     "Referer": URL,
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent": "Mozilla/5.0 ur-monitor (+github-actions)",
+    "User-Agent": "ur-monitor/1.0 (+github-actions)",
     "Accept": "application/json, text/javascript, */*; q=0.01",
-    "X-Requested-With": "XMLHttpRequest",
 }
-# 旧フォーム（ページングは pageIndex=0,1,2…）
-API_V2 = API_V1  # 同じエンドポイントで FORM が違うケースがあるため
-API_V2_HEADERS = {
-    "Origin": "https://www.ur-net.go.jp",
+
+PUB_HEADERS = {
     "Referer": URL,
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "User-Agent": "Mozilla/5.0 ur-monitor (+github-actions)",
+    "User-Agent": "ur-monitor/1.0 (+github-actions)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
-PAGE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 ur-monitor (+github-actions)",
-    "Referer": "https://www.ur-net.go.jp/chintai/",
-    "Accept-Language": "ja,en;q=0.8",
-}
+def make_payload(page: int) -> dict:
+    """内部API payload。indexNo は 1 始まり。"""
+    return {"danchiCd": DANCHI, "indexNo": str(page), "pageSize": "20"}
 
-# -------- helpers --------
-def in_window(now):
-    s = now.replace(hour=WINDOW_START[0], minute=WINDOW_START[1], second=0, microsecond=0)
-    e = now.replace(hour=WINDOW_END[0],   minute=WINDOW_END[1],   second=59, microsecond=0)
-    return s <= now <= e
+# -------- Helpers --------
+def in_window(now) -> bool:
+    start = now.replace(hour=WINDOW_START[0], minute=WINDOW_START[1], second=0,  microsecond=0)
+    end   = now.replace(hour=WINDOW_END[0],   minute=WINDOW_END[1],   second=59, microsecond=0)
+    return start <= now <= end
 
 def decode_area(s: str) -> str:
     if not s: return ""
-    return (s.replace("㎡", "m²").replace("&sup2;", "²").replace("m&sup2;", "m²").replace("\u33a1", "m²"))
+    return (s.replace("㎡", "m²")
+             .replace("&sup2;", "²")
+             .replace("m&sup2;", "m²")
+             .replace("\u33a1", "m²"))
 
-def parse_api_text(text: str):
+def parse_entries(text: str):
+    """JSON/HTML どちらでも部屋リストに正規化。"""
+    # JSON 試行
     try:
         data = json.loads(text)
     except Exception:
-        return None
+        data = None
+
     items = None
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        for key in ("result", "resultList", "data", "rows"):
-            if key in data and isinstance(data[key], list):
-                items = data[key]; break
-    if items is None: return None
+        for k in ("result", "resultList", "data", "rows"):
+            if k in data and isinstance(data[k], list):
+                items = data[k]; break
+
     rooms = []
-    for it in items:
-        rooms.append({
-            "id":        str(it.get("id") or it.get("roomId") or ""),
-            "name":      str(it.get("name") or it.get("roomNo") or ""),
-            "type":      str(it.get("type") or it.get("layout") or ""),
-            "floorspace": decode_area(str(it.get("floorspace") or it.get("area") or "")),
-            "floor":     str(it.get("floor") or ""),
-            "rent":      str(it.get("rent") or ""),
-            "commonfee": str(it.get("commonfee") or it.get("maintenanceFee") or ""),
-        })
-    return rooms
+    if items is not None:
+        for it in items:
+            rooms.append({
+                "id":        str(it.get("id") or it.get("roomId") or ""),
+                "name":      str(it.get("name") or it.get("roomNo") or ""),
+                "type":      str(it.get("type") or it.get("layout") or ""),
+                "floorspace": decode_area(str(it.get("floorspace") or it.get("area") or "")),
+                "floor":     str(it.get("floor") or ""),
+                "rent":      str(it.get("rent") or ""),
+                "commonfee": str(it.get("commonfee") or it.get("maintenanceFee") or ""),
+            })
+        return rooms
 
-# ---- HTML parsers（公開/iframe 共通）----
-_name_re  = re.compile(r"(\d{2,4})号室")
-_layout_re= re.compile(r"(?:[1-4]LDK|[1-4]DK|[1-4]K|ワンルーム)")
-_area_re  = re.compile(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)")
-_floor_re = re.compile(r"(\d+)\s*階")
-_rent_re  = re.compile(r"([\d,]+)\s*円")
-_comm_re  = re.compile(r"共益?費.*?([\d,]+)\s*円|\(([\d,]+)\s*円\)")
+    # HTML 断片を緩くパース（table/tr/li など全部テキスト抽出して正規表現）
+    soup = BeautifulSoup(text, "html.parser")
+    candidates = soup.select("tr, li, .room, .roomCard, .list, .table")
+    for c in candidates:
+        txt = c.get_text(" ", strip=True)
+        if not txt: continue
+        name_m   = re.search(r"(\d{2,4})号室", txt)
+        layout_m = re.search(r"((?:[1-4]LDK)|(?:[1-4]DK)|(?:[1-4]K)|(?:ワンルーム))", txt)
+        area_m   = re.search(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)", txt)
+        # 「29階／41階」など
+        floor_m  = re.search(r"(\d+)\s*階(?:\s*[／/]\s*\d+階?)?", txt)
+        rent_m   = re.search(r"(?:賃料|家賃).*?([\d,]+)\s*円|([\d,]+)\s*円", txt)
+        comm_m   = re.search(r"共益?費.*?([\d,]+)\s*円", txt)
 
-def parse_table_html(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    rooms = []
-    scopes = soup.select("table") or [soup]
-    for scope in scopes:
-        for tr in scope.select("tr"):
-            txt = tr.get_text(" ", strip=True)
-            if not txt: continue
-            m_name = _name_re.search(txt)
-            if not m_name: continue
-
-            tds = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-            rent_txt = ""
-            for t in tds:
-                m = _rent_re.search(t)
-                if m: rent_txt = m.group(1) + "円"; break
-            if not rent_txt:
-                m = _rent_re.search(txt)
-                rent_txt = m.group(1) + "円" if m else ""
-
-            comm_txt = ""
-            for t in tds:
-                m = _comm_re.search(t)
-                if m: comm_txt = (m.group(1) or m.group(2)) + "円"; break
-            if not comm_txt:
-                m = _comm_re.search(txt)
-                if m: comm_txt = (m.group(1) or m.group(2)) + "円"
-
-            m_layout = _layout_re.search(txt)
-            m_area   = _area_re.search(txt)
-            m_floor  = _floor_re.search(txt)
-
+        if name_m or rent_m:
+            rent_val = ""
+            if rent_m:
+                rent_val = (rent_m.group(1) or rent_m.group(2) or "")
+                rent_val = rent_val + "円" if rent_val else ""
             rooms.append({
                 "id": "",
-                "name": m_name.group(1) + "号室",
-                "type": m_layout.group(0) if m_layout else "",
-                "floorspace": (m_area.group(1) + "㎡") if m_area else "",
-                "floor": (m_floor.group(1) + "階") if m_floor else "",
-                "rent": rent_txt,
-                "commonfee": comm_txt,
+                "name": (name_m.group(1) + "号室") if name_m else "",
+                "type": layout_m.group(1) if layout_m else "",
+                "floorspace": (area_m.group(1) + "㎡") if area_m else "",
+                "floor": (floor_m.group(1) + "階") if floor_m else "",
+                "rent": rent_val,
+                "commonfee": (comm_m.group(1) + "円") if comm_m else "",
             })
     return rooms
 
-# -------- fetchers --------
-def fetch_from_api_v1(session: requests.Session):
-    results = []
-    page = 1
-    while page <= 10:
-        payload = {"danchiCd": DANCHI, "indexNo": str(page), "pageSize": "20"}
+# ---- public page via iframe ----
+def _set_query(url: str, **kv) -> str:
+    u = urlparse(url)
+    q = parse_qs(u.query)
+    for k, v in kv.items():
+        q[k] = [str(v)]
+    new_q = urlencode({k: v[-1] for k, v in q.items()})
+    return urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
+
+def fetch_public_via_iframe() -> list[dict]:
+    """外側ページ→iframe src→その中身を取りに行く。ページングも軽く対応。"""
+    out = []
+
+    r0 = requests.get(URL, headers=PUB_HEADERS, timeout=15)
+    r0.raise_for_status()
+    soup = BeautifulSoup(r0.text, "html.parser")
+    tag = soup.find("iframe")
+    if not tag or not tag.get("src"):
+        print("[fetch] iframe not found on outer page")
+        return out
+
+    iframe_url = urljoin(URL, tag.get("src"))
+    print(f"[fetch] iframe {iframe_url}")
+
+    # 0,1,2... と pageIndex/idx/page っぽいキーを試す（最大5ページ）
+    keys = ("pageIndex", "idx", "page")
+    for i in range(5):
+        u = iframe_url
+        # 既にクエリにキーがあるならそれを書き換え、無ければ pageIndex を付与
+        parsed = urlparse(u)
+        q = parse_qs(parsed.query)
+        target_key = None
+        for k in keys:
+            if k in q:
+                target_key = k; break
+        if target_key:
+            u = _set_query(u, **{target_key: i})
+        else:
+            u = _set_query(u, pageIndex=i)
+
         try:
-            r = session.post(API_V1, headers=API_V1_HEADERS, data=payload, timeout=12)
+            ri = requests.get(u, headers=PUB_HEADERS, timeout=15)
+            ri.raise_for_status()
+            items = parse_entries(ri.text)
+            print(f"[fetch] public page i={i} -> {len(items)} rooms")
+            if not items:
+                # 連続で0になったら終わりでOK
+                if i == 0:
+                    # 1ページ目から0なら以降も期待薄
+                    break
+                else:
+                    continue
+            out.extend(items)
+            # 一覧が1ページ構成っぽい場合はそこで終了
+            if len(items) < 20:
+                break
         except Exception as e:
-            print(f"[fetch] api(v1) error p={page}: {e}"); return None
-        if r.status_code != 200:
-            print(f"[fetch] api(v1) HTTP {r.status_code} p={page}"); return None
-        rooms = parse_api_text(r.text)
-        if rooms is None:
-            # HTMLが返ってきている（認可/クッキー不足など）
-            print(f"[fetch] api(v1) non-JSON p={page}")
-            return None
-        results.extend(rooms)
-        if len(rooms) < 20: break
-        page += 1
-    print(f"[fetch] api(v1) -> {len(results)} rooms")
-    return results
-
-def fetch_from_api_v2(session: requests.Session):
-    """旧フォーム：pageIndex と 3桁 danchi を使う"""
-    results = []
-    page_idx = 0
-    while page_idx <= 9:
-        form = (
-            "rent_low=&rent_high=&floorspace_low=&floorspace_high="
-            f"&shisya=20&danchi={DANCHI3}&shikibetu=0&newBukkenRoom="
-            f"&orderByField=0&orderBySort=0&pageIndex={page_idx}&sp="
-        )
-        try:
-            r = session.post(API_V2, headers=API_V2_HEADERS, data=form, timeout=12)
-        except Exception as e:
-            print(f"[fetch] api(v2-old) error i={page_idx}: {e}"); return None
-        if r.status_code != 200:
-            print(f"[fetch] api(v2-old) HTTP {r.status_code} i={page_idx}"); return None
-
-        # v2 は JSON のときと HTML 断片のときがある
-        rooms = parse_api_text(r.text)
-        if rooms is None:
-            rooms = parse_table_html(r.text)
-
-        if not rooms:
-            # 次ページなし
+            print(f"[fetch] iframe page error i={i}: {e}")
             break
-        results.extend(rooms)
-        if len(rooms) < 20:
-            break
-        page_idx += 1
-    if results:
-        print(f"[fetch] api(v2-old) -> {len(results)} rooms")
-    else:
-        print("[fetch] api(v2-old) -> 0 rooms")
-    return results or None
 
-def fetch_from_public(session: requests.Session):
-    # 本体
+    return out
+
+# ---- all fetch paths ----
+def fetch_all() -> list[dict]:
+    # 1) 内部API（通れば使う）
     try:
-        r = session.get(URL, headers=PAGE_HEADERS, timeout=12)
-        r.raise_for_status()
+        page = 1
+        got = []
+        while page <= 10:
+            payload = make_payload(page)
+            r = requests.post(API_ENDPOINT, headers=API_HEADERS, data=payload, timeout=10)
+            try:
+                j = r.json()
+            except Exception:
+                print(f"[fetch] api(v1) non-JSON p={page}")
+                got = []
+                break
+            items = parse_entries(json.dumps(j))
+            if not items:
+                break
+            got.extend(items)
+            if len(items) < 20:
+                break
+            page += 1
+        if got:
+            return got
     except Exception as e:
-        print(f"[fetch] public page error: {e}")
-        return []
-    rooms = parse_table_html(r.text)
-    if rooms:
-        print(f"[fetch] public page -> {len(rooms)} rooms")
-        return rooms
+        print(f"[fetch] api(v1) error: {e}")
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    candidates = []
-    for ifr in soup.select("iframe[src]"):
-        src = ifr.get("src", "")
-        if any(k in src for k in ("danchi", "bukken", "result", "room", "list")):
-            candidates.append(src)
-    if not candidates:
-        candidates = [ifr.get("src", "") for ifr in soup.select("iframe[src]")]
+    # 2) 旧APIなど別経路（今回はスキップ or 0 件で継続）
+    print("[fetch] api(v2-old) -> 0 rooms")
 
-    for src in candidates:
-        if not src: continue
-        url2 = urljoin(URL, src)
-        try:
-            r2 = session.get(url2, headers=PAGE_HEADERS, timeout=12)
-            r2.raise_for_status()
-        except Exception as e:
-            print(f"[fetch] iframe get failed {url2}: {e}")
-            continue
-        rooms = parse_table_html(r2.text)
-        if rooms:
-            print(f"[fetch] iframe({url2}) -> {len(rooms)} rooms")
-            return rooms
+    # 3) public iframe を踏む
+    got = fetch_public_via_iframe()
+    if got:
+        return got
 
-    print("[fetch] html fallback -> 0 rooms")
-    return []
-
-def fetch_all():
-    # まずセッション確立（クッキー/リファラ）
-    session = requests.Session()
+    # 4) 最後の保険：外側HTMLをそのまま（ほぼ0件になる想定）
     try:
-        session.get(URL, headers=PAGE_HEADERS, timeout=10)
-    except Exception:
-        pass
+        r = requests.get(URL, headers=PUB_HEADERS, timeout=15)
+        r.raise_for_status()
+        items = parse_entries(r.text)
+        print(f"[fetch] html fallback -> {len(items)} rooms")
+        return items
+    except Exception as e:
+        print(f"[fetch] html error: {e}")
+        return []
 
-    # 1) API v1
-    rooms = fetch_from_api_v1(session)
-    if rooms: return rooms
-    # 2) 旧フォーム v2
-    rooms = fetch_from_api_v2(session)
-    if rooms: return rooms
-    # 3) 公開ページ（iframe対応）
-    return fetch_from_public(session)
-
-# -------- diff & notify --------
 def canonicalize(rooms):
     canon = []
     for r in rooms:
-        def clean(s): return re.sub(r"[,\s]", "", decode_area(s or ""))
-        canon.append((clean(r.get("name")), clean(r.get("type")), clean(r.get("floorspace")),
-                      clean(r.get("floor")), clean(r.get("rent")), clean(r.get("commonfee"))))
+        def clean(s):
+            s = decode_area(s or "")
+            return re.sub(r"[,\s]", "", s)
+        canon.append((
+            clean(r.get("name")),
+            clean(r.get("type")),
+            clean(r.get("floorspace")),
+            clean(r.get("floor")),
+            clean(r.get("rent")),
+            clean(r.get("commonfee")),
+        ))
     return sorted(set(canon))
 
 def load_state():
-    if not os.path.exists(STATE_PATH): return set(), True
+    if not os.path.exists(STATE_PATH):
+        return set(), True
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         rooms = data["rooms"] if isinstance(data, dict) and "rooms" in data else data
-        if not isinstance(rooms, list): return set(), True
+        if not isinstance(rooms, list):
+            return set(), True
         return set(tuple(x) for x in rooms), False
     except Exception:
         return set(), True
@@ -284,12 +267,14 @@ def save_state(s: set):
     os.replace(tmp, STATE_PATH)
 
 def notify(msg: str):
-    token = os.getenv("CHATWORK_TOKEN"); room = os.getenv("CHATWORK_ROOM_ID")
-    if not token or not room: print(msg); return
+    token   = os.getenv("CHATWORK_TOKEN")
+    room_id = os.getenv("CHATWORK_ROOM_ID")
+    if not token or not room_id:
+        print(msg); return
     body = msg if len(msg) <= 9000 else (msg[:9000] + "\n…(truncated)")
     try:
         r = requests.post(
-            f"https://api.chatwork.com/v2/rooms/{room}/messages",
+            f"https://api.chatwork.com/v2/rooms/{room_id}/messages",
             headers={"X-ChatWorkToken": token},
             data={"body": f"[info][title]UR監視[/title]{body}[/info]"},
             timeout=15,
@@ -298,25 +283,29 @@ def notify(msg: str):
     except Exception as e:
         print(f"notify_failed: {e}"); print(msg)
 
-# -------- heartbeat --------
+# -------- Heartbeat state --------
 HB_FILE = ".hb-date.txt"
-def _hb_sent_today(now):
+def _hb_sent_today(now) -> bool:
     try:
         with open(HB_FILE, "r", encoding="utf-8") as f:
             return f.read().strip() == now.strftime("%Y%m%d")
-    except Exception: return False
-def _hb_mark(now):
+    except Exception:
+        return False
+def _hb_mark(now) -> None:
     with open(HB_FILE, "w", encoding="utf-8") as f:
         f.write(now.strftime("%Y%m%d"))
 
 # -------- Main --------
 def main():
     now = datetime.now(JST)
+
+    # 9:30〜9:39 の間、かつ今日まだ送っていなければ一度だけ送る
     if now.hour == 9 and 30 <= now.minute < 40 and not _hb_sent_today(now):
         try:
             notify(f"[UR監視 起動ハートビート] JST {now:%H:%M} / {URL}")
             _hb_mark(now)
-        except Exception: pass
+        except Exception:
+            pass
 
     if not in_window(now):
         print("skip_out_of_window"); return
@@ -331,8 +320,10 @@ def main():
         added   = current - prev
         removed = prev - current
         lines = []
-        if added:   lines.append("+ " + " / ".join([a[0] for a in sorted(added)][:5]))
-        if removed: lines.append("− " + " / ".join([a[0] for a in sorted(removed)][:5]))
+        if added:
+            lines.append("+ " + " / ".join([a[0] for a in sorted(added)][:5]))
+        if removed:
+            lines.append("− " + " / ".join([a[0] for a in sorted(removed)][:5]))
         notify("【UR監視 変化あり】\n" + ("\n".join(lines) if lines else "差分あり") + f"\n{URL}")
     else:
         print("no_change")

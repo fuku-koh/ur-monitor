@@ -61,7 +61,17 @@ jobs:
           STATE_FILE: .state-${{ matrix.prop_id }}.json
           CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
           CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
+          DEBUG: "1"                 # ← 追加
         run: python ur_monitor.py
+
+      - name: Upload debug artifacts (${{ matrix.prop_id }})
+        if: steps.gate.outputs.inwindow == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ matrix.prop_id }}-${{ github.run_id }}
+          path: .debug/**
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Persist state (${{ matrix.prop_id }})
         if: steps.gate.outputs.inwindow == 'true'

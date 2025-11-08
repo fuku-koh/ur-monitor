@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
 UR vacancy monitor (GitHub Actions friendly)
-- Polls UR endpoints and the public iframe listing; detects diffs.
-- Notifies via ChatWork (fallback: print).
+- Polls the UR internal endpoint via POST (no JS) and detects diffs.
+- Notifies via ChatWork; otherwise prints to logs.
 """
 
 import os, json, re, time
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urljoin, urlencode, urlparse, parse_qs, urlunparse
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
+
 import requests
 from bs4 import BeautifulSoup
 
@@ -16,7 +17,7 @@ PROP_ID    = os.getenv("PROP_ID", "7080")
 STATE_PATH = os.getenv("STATE_FILE", ".state.json")
 
 def to_danchi_code(prop_id: str) -> str:
-    # 7080 だけ "7080e"
+    # 7080 だけ "7080e" になる（他はそのまま）
     return {"7080": "7080e"}.get(prop_id, prop_id)
 
 DANCHI = to_danchi_code(PROP_ID)
@@ -29,54 +30,60 @@ JST = timezone(timedelta(hours=9))
 WINDOW_START = (9, 30)
 WINDOW_END   = (18, 59)
 
-# 内部API（通れば使う / ダメなら無視）
-API_ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
+# UR の内部API（POST：古いがまだ生きていることがある）
+ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 API_HEADERS = {
     "Origin": "https://www.ur-net.go.jp",
-    "Referer": URL,
+    "Referer": URL,  # 物件ページを参照元にする
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "ur-monitor/1.0 (+github-actions)",
     "Accept": "application/json, text/javascript, */*; q=0.01",
 }
 
+# 公開ページ/iframe 取得用
 PUB_HEADERS = {
-    "Referer": URL,
     "User-Agent": "ur-monitor/1.0 (+github-actions)",
+    "Referer": "https://www.ur-net.go.jp/",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en;q=0.8",
 }
 
 def make_payload(page: int) -> dict:
-    """内部API payload。indexNo は 1 始まり。"""
+    """APIが受け付ける最小のペイロード。indexNo は 1 始まり。"""
     return {"danchiCd": DANCHI, "indexNo": str(page), "pageSize": "20"}
 
+
 # -------- Helpers --------
-def in_window(now) -> bool:
+def in_window(now: datetime) -> bool:
     start = now.replace(hour=WINDOW_START[0], minute=WINDOW_START[1], second=0,  microsecond=0)
     end   = now.replace(hour=WINDOW_END[0],   minute=WINDOW_END[1],   second=59, microsecond=0)
     return start <= now <= end
 
 def decode_area(s: str) -> str:
-    if not s: return ""
+    if not s:
+        return ""
     return (s.replace("㎡", "m²")
              .replace("&sup2;", "²")
              .replace("m&sup2;", "m²")
              .replace("\u33a1", "m²"))
 
 def parse_entries(text: str):
-    """JSON/HTML どちらでも部屋リストに正規化。"""
-    # JSON 試行
+    """JSON/HTML どちらでも部屋リストに正規化する。"""
+    # 1) JSON っぽいならJSON優先で解釈
+    data = None
     try:
         data = json.loads(text)
     except Exception:
-        data = None
+        pass
 
     items = None
     if isinstance(data, list):
         items = data
     elif isinstance(data, dict):
-        for k in ("result", "resultList", "data", "rows"):
-            if k in data and isinstance(data[k], list):
-                items = data[k]; break
+        for key in ("result", "resultList", "data", "rows"):
+            if key in data and isinstance(data[key], list):
+                items = data[key]
+                break
 
     rooms = []
     if items is not None:
@@ -92,24 +99,26 @@ def parse_entries(text: str):
             })
         return rooms
 
-    # HTML 断片を緩くパース（table/tr/li など全部テキスト抽出して正規表現）
+    # 2) HTML断片をパース（公開ページのテーブル/カードなど）
     soup = BeautifulSoup(text, "html.parser")
+    # テーブル行 or カード状の要素などを広めに拾う
     candidates = soup.select("tr, li, .room, .roomCard, .list, .table")
     for c in candidates:
         txt = c.get_text(" ", strip=True)
-        if not txt: continue
+        if not txt:
+            continue
+        # 代表的な表記を正規表現で抽出
         name_m   = re.search(r"(\d{2,4})号室", txt)
         layout_m = re.search(r"((?:[1-4]LDK)|(?:[1-4]DK)|(?:[1-4]K)|(?:ワンルーム))", txt)
         area_m   = re.search(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)", txt)
-        # 「29階／41階」など
-        floor_m  = re.search(r"(\d+)\s*階(?:\s*[／/]\s*\d+階?)?", txt)
-        rent_m   = re.search(r"(?:賃料|家賃).*?([\d,]+)\s*円|([\d,]+)\s*円", txt)
-        comm_m   = re.search(r"共益?費.*?([\d,]+)\s*円", txt)
+        floor_m  = re.search(r"(\d+)\s*階", txt)
+        rent_m   = re.search(r"賃料[:：]?\s*([\d,]+)\s*円|([\d,]+)\s*円", txt)
+        comm_m   = re.search(r"共益?費[:：]?\s*([\d,]+)\s*円", txt)
 
         if name_m or rent_m:
             rent_val = ""
             if rent_m:
-                rent_val = (rent_m.group(1) or rent_m.group(2) or "")
+                rent_val = rent_m.group(1) or rent_m.group(2) or ""
                 rent_val = rent_val + "円" if rent_val else ""
             rooms.append({
                 "id": "",
@@ -122,7 +131,38 @@ def parse_entries(text: str):
             })
     return rooms
 
-# ---- public page via iframe ----
+
+# ====== 取得系（API → iframe → HTML保険） ======
+def fetch_api_v2_old() -> list[dict]:
+    """古い内部API（danchiCd/indexNo）を素直にページング"""
+    results = []
+    page = 1
+    while page <= 10:  # 念のため
+        payload = make_payload(page)
+        try:
+            r = requests.post(ENDPOINT, headers=API_HEADERS, data=payload, timeout=12)
+            # 稀に "200 だが HTML" のようなケースがあるのでいったん text から判定
+            try:
+                r.raise_for_status()
+                items = parse_entries(r.text)
+            except Exception:
+                print(f"[fetch] api(v2-old) HTTP{r.status_code} text_len={len(r.text)}")
+                break
+        except Exception as e:
+            print(f"[fetch] api(v2-old) error p={page}: {e}")
+            break
+
+        if not items:
+            break
+        results.extend(items)
+        if len(items) < 20:  # 1ページ満杯でなければ終端
+            break
+        page += 1
+
+    print(f"[fetch] api(v2-old) -> {len(results)} rooms")
+    return results
+
+
 def _set_query(url: str, **kv) -> str:
     u = urlparse(url)
     q = parse_qs(u.query)
@@ -131,106 +171,124 @@ def _set_query(url: str, **kv) -> str:
     new_q = urlencode({k: v[-1] for k, v in q.items()})
     return urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
 
+def _pick_listing_iframe(soup: BeautifulSoup, base_url: str) -> str | None:
+    """
+    外側ページに複数 iframe があるので、物件リストっぽいものだけ選ぶ。
+    - googletagmanager.com は除外（今回の原因）
+    - ur-net.go.jp かつ /chintai/ を含む
+    - list/search/result/room/bukken などを含むほどスコア加点
+    """
+    cands = []
+    for f in soup.find_all("iframe"):
+        src = (f.get("src") or "").strip()
+        if not src:
+            continue
+        absu = urljoin(base_url, src)
+        pu = urlparse(absu)
+        host, path = pu.netloc, pu.path
+
+        # GTM などは除外
+        if "googletagmanager.com" in host:
+            continue
+        # ur-net配下かつ /chintai/
+        if "ur-net.go.jp" in host and "/chintai/" in path:
+            score = 0
+            if any(k in path for k in ("list", "search", "result", "room", "bukken")):
+                score += 2
+            if pu.query:
+                score += 1
+            cands.append((score, absu))
+
+    if not cands:
+        return None
+    cands.sort(reverse=True)  # スコア高い順
+    return cands[0][1]
+
 def fetch_public_via_iframe() -> list[dict]:
-    """外側ページ→iframe src→その中身を取りに行く。ページングも軽く対応。"""
-    out = []
+    """外側ページ→正しい listing iframe を選んで取得。簡易ページングにも対応。"""
+    out: list[dict] = []
 
     r0 = requests.get(URL, headers=PUB_HEADERS, timeout=15)
     r0.raise_for_status()
     soup = BeautifulSoup(r0.text, "html.parser")
-    tag = soup.find("iframe")
-    if not tag or not tag.get("src"):
-        print("[fetch] iframe not found on outer page")
+
+    target = _pick_listing_iframe(soup, URL)
+    if not target:
+        print("[fetch] listing iframe not found on outer page")
         return out
 
-    iframe_url = urljoin(URL, tag.get("src"))
-    print(f"[fetch] iframe {iframe_url}")
+    print(f"[fetch] iframe listing {target}")
 
-    # 0,1,2... と pageIndex/idx/page っぽいキーを試す（最大5ページ）
+    # まずはそのまま
+    try:
+        r = requests.get(target, headers=PUB_HEADERS, timeout=15)
+        r.raise_for_status()
+        items = parse_entries(r.text)
+        print(f"[fetch] public page raw -> {len(items)} rooms")
+        out.extend(items)
+        # 1ページで十分な件数なら終了
+        if items and len(items) < 20:
+            return out
+    except Exception as e:
+        print(f"[fetch] iframe fetch error: {e}")
+
+    # 簡易ページング（0/1/2… を複数キーで試す。最大5ページ）
     keys = ("pageIndex", "idx", "page")
-    for i in range(5):
-        u = iframe_url
-        # 既にクエリにキーがあるならそれを書き換え、無ければ pageIndex を付与
-        parsed = urlparse(u)
-        q = parse_qs(parsed.query)
-        target_key = None
-        for k in keys:
-            if k in q:
-                target_key = k; break
-        if target_key:
-            u = _set_query(u, **{target_key: i})
-        else:
-            u = _set_query(u, pageIndex=i)
-
-        try:
-            ri = requests.get(u, headers=PUB_HEADERS, timeout=15)
-            ri.raise_for_status()
-            items = parse_entries(ri.text)
-            print(f"[fetch] public page i={i} -> {len(items)} rooms")
-            if not items:
-                # 連続で0になったら終わりでOK
-                if i == 0:
-                    # 1ページ目から0なら以降も期待薄
-                    break
-                else:
-                    continue
-            out.extend(items)
-            # 一覧が1ページ構成っぽい場合はそこで終了
-            if len(items) < 20:
+    seen = set()
+    for key in keys:
+        for i in range(5):
+            u = _set_query(target, **{key: i})
+            if u in seen:
+                continue
+            seen.add(u)
+            try:
+                ri = requests.get(u, headers=PUB_HEADERS, timeout=15)
+                ri.raise_for_status()
+                items = parse_entries(ri.text)
+                print(f"[fetch] public {key}={i} -> {len(items)} rooms")
+                if items:
+                    out.extend(items)
+                    if len(items) < 20:
+                        return out
+            except Exception as e:
+                print(f"[fetch] iframe page error {key}={i}: {e}")
                 break
-        except Exception as e:
-            print(f"[fetch] iframe page error i={i}: {e}")
-            break
 
     return out
 
-# ---- all fetch paths ----
-def fetch_all() -> list[dict]:
-    # 1) 内部API（通れば使う）
-    try:
-        page = 1
-        got = []
-        while page <= 10:
-            payload = make_payload(page)
-            r = requests.post(API_ENDPOINT, headers=API_HEADERS, data=payload, timeout=10)
-            try:
-                j = r.json()
-            except Exception:
-                print(f"[fetch] api(v1) non-JSON p={page}")
-                got = []
-                break
-            items = parse_entries(json.dumps(j))
-            if not items:
-                break
-            got.extend(items)
-            if len(items) < 20:
-                break
-            page += 1
-        if got:
-            return got
-    except Exception as e:
-        print(f"[fetch] api(v1) error: {e}")
-
-    # 2) 旧APIなど別経路（今回はスキップ or 0 件で継続）
-    print("[fetch] api(v2-old) -> 0 rooms")
-
-    # 3) public iframe を踏む
-    got = fetch_public_via_iframe()
-    if got:
-        return got
-
-    # 4) 最後の保険：外側HTMLをそのまま（ほぼ0件になる想定）
+def fetch_html_fallback() -> list[dict]:
+    """外側ページの HTML を直接パース（最終保険）。"""
     try:
         r = requests.get(URL, headers=PUB_HEADERS, timeout=15)
         r.raise_for_status()
-        items = parse_entries(r.text)
-        print(f"[fetch] html fallback -> {len(items)} rooms")
-        return items
+        rooms = parse_entries(r.text)
+        print(f"[fetch] html fallback -> {len(rooms)} rooms")
+        return rooms
     except Exception as e:
-        print(f"[fetch] html error: {e}")
+        print(f"[fetch] html fallback error: {e}")
         return []
 
+
+def fetch_all() -> list[dict]:
+    """API → iframe → HTML保険 の順で拾う。"""
+    # 1) 旧API
+    rooms = fetch_api_v2_old()
+    if rooms:
+        return rooms
+
+    # 2) 正しい listing iframe を選別して取得（今回の修正）
+    rooms = fetch_public_via_iframe()
+    if rooms:
+        return rooms
+
+    # 3) 保険
+    rooms = fetch_html_fallback()
+    return rooms
+
+
+# ====== 差分比較 & 状態 ======
 def canonicalize(rooms):
+    """差分比較用に正規化してタプル集合へ。"""
     canon = []
     for r in rooms:
         def clean(s):
@@ -266,11 +324,14 @@ def save_state(s: set):
         json.dump(payload, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_PATH)
 
+
+# ====== 通知 ======
 def notify(msg: str):
     token   = os.getenv("CHATWORK_TOKEN")
     room_id = os.getenv("CHATWORK_ROOM_ID")
     if not token or not room_id:
-        print(msg); return
+        print(msg)
+        return
     body = msg if len(msg) <= 9000 else (msg[:9000] + "\n…(truncated)")
     try:
         r = requests.post(
@@ -281,21 +342,26 @@ def notify(msg: str):
         )
         print(f"chatwork_status={r.status_code} {r.text[:120]}")
     except Exception as e:
-        print(f"notify_failed: {e}"); print(msg)
+        print(f"notify_failed: {e}")
+        print(msg)
 
-# -------- Heartbeat state --------
+
+# ====== Heartbeat ======
 HB_FILE = ".hb-date.txt"
+
 def _hb_sent_today(now) -> bool:
     try:
         with open(HB_FILE, "r", encoding="utf-8") as f:
             return f.read().strip() == now.strftime("%Y%m%d")
     except Exception:
         return False
+
 def _hb_mark(now) -> None:
     with open(HB_FILE, "w", encoding="utf-8") as f:
         f.write(now.strftime("%Y%m%d"))
 
-# -------- Main --------
+
+# ====== Main ======
 def main():
     now = datetime.now(JST)
 
@@ -308,7 +374,8 @@ def main():
             pass
 
     if not in_window(now):
-        print("skip_out_of_window"); return
+        print("skip_out_of_window")
+        return
 
     prev, is_init = load_state()
     rooms = fetch_all()
@@ -329,6 +396,7 @@ def main():
         print("no_change")
 
     save_state(current)
+
 
 if __name__ == "__main__":
     main()

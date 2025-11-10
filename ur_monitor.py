@@ -66,7 +66,13 @@ PUB_HEADERS = {
     "Referer": "https://www.ur-net.go.jp/",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
+
+def _nocache(u: str) -> str:
+    """CDN/ブラウザキャッシュ回避用にクエリを足す"""
+    return u + ("&" if "?" in u else "?") + f"_={int(time.time())}"
 
 def make_payload(page: int) -> dict:
     """APIが受け付ける最小のペイロード。indexNo は 1 始まり。"""
@@ -243,7 +249,7 @@ def fetch_public_via_embed() -> list[dict]:
     out: list[dict] = []
 
     try:
-        r0 = requests.get(URL, headers=PUB_HEADERS, timeout=15)
+        r0 = requests.get(_nocache(URL), headers=PUB_HEADERS, timeout=15)
         r0.raise_for_status()
     except Exception as e:
         print(f"[fetch] outer get failed: {e}")
@@ -285,7 +291,7 @@ def fetch_public_via_embed() -> list[dict]:
     for cand in sorted(cands, key=_score)[:8]:
         tried += 1
         try:
-            r = requests.get(cand, headers=PUB_HEADERS, timeout=15)
+            r = requests.get(_nocache(cand), headers=PUB_HEADERS, timeout=15)
             r.raise_for_status()
             _dump(f"try{tried}.url.txt", cand)
             _dump(f"try{tried}.html", r.text)
@@ -298,7 +304,7 @@ def fetch_public_via_embed() -> list[dict]:
                 for key in ("pageIndex", "idx", "page"):
                     for i in range(1, 5):
                         u = _set_query(cand, **{key: i})
-                        ri = requests.get(u, headers=PUB_HEADERS, timeout=15)
+                        ri = requests.get(_nocache(u), headers=PUB_HEADERS, timeout=15)
                         if ri.status_code != 200:
                             break
                         _dump(f"try{tried}.{key}={i}.html", ri.text)
@@ -319,7 +325,7 @@ def fetch_public_via_embed() -> list[dict]:
 def fetch_html_fallback() -> list[dict]:
     """外側ページの HTML を直接パース（最終保険）。"""
     try:
-        r = requests.get(URL, headers=PUB_HEADERS, timeout=15)
+        r = requests.get(_nocache(URL), headers=PUB_HEADERS, timeout=15)
         r.raise_for_status()
         rooms = parse_entries(r.text)
         print(f"[fetch] html fallback -> {len(rooms)} rooms")

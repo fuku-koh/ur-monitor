@@ -53,13 +53,13 @@ WINDOW_END   = (18, 59)
 ENDPOINT = "https://chintai.r6.ur-net.go.jp/chintai/api/bukken/detail/detail_bukken_room/"
 API_HEADERS = {
     "Origin": "https://www.ur-net.go.jp",
-    "Referer": URL,  # 物件ページを参照元にする
+    "Referer": URL,
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "User-Agent": "ur-monitor/1.0 (+github-actions)",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept": "application/json, text/javascript, */*;q=0.01",
 }
 
-# 公開ページ/iframe 取得用（HTML）: SSR を返しやすい普通の UA にする
+# 公開ページ/iframe 取得用（HTML）— SSR を返しやすいブラウザ UA にする
 PUB_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -130,6 +130,7 @@ def parse_entries(text: str):
         layout_m = re.search(r"((?:[1-4]LDK)|(?:[1-4]DK)|(?:[1-4]K)|(?:ワンルーム))", txt)
         area_m   = re.search(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)", txt)
         floor_m  = re.search(r"(\d+)\s*階", txt)
+        # 家賃の表記ゆらぎを広めに拾う
         rent_m   = re.search(r"(?:賃料[:：]?\s*([\d,]+)\s*円)|(?:\b([\d,]+)\s*円\b)", txt)
         comm_m   = re.search(r"共益?費[:：]?\s*([\d,]+)\s*円", txt)
 
@@ -157,26 +158,8 @@ def _set_query(url: str, **kv) -> str:
     new_q = urlencode({k: v[-1] for k, v in q.items()})
     return urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
 
-# --- 生テキストから chintai 系 URL を抜く（外部JSにも対応） ---
-def _harvest_urls_from_text(html: str, base_url: str) -> list[str]:
-    urls: set[str] = set()
-    # 絶対URL
-    for m in re.finditer(r'https?://[^\s\'")<>]+', html):
-        u = m.group(0)
-        pu = urlparse(u)
-        if "ur-net.go.jp" in pu.netloc and "/chintai/" in pu.path and "googletagmanager" not in pu.netloc:
-            urls.add(u)
-    # 相対URL（"/chintai/..."）
-    for m in re.finditer(r'["\'](/[^"\']*chintai/[^"\']+)["\']', html):
-        urls.add(urljoin(base_url, m.group(1)))
-    return list(urls)
-
-# --- 公開ページ → iframe / 直リンク候補の収集 ---
+# --- 公開ページ → iframe / 直リンク候補の収集（ur-net の /chintai/ のみ採用） ---
 def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> list[str]:
-    """
-    外枠ページから実一覧に辿れる候補URLを広めに収集して絶対URLで返す。
-    *.ur-net.go.jp かつ /chintai/ を含むものだけ採用。GTM は除外。
-    """
     urls: set[str] = set()
 
     def _allow(u: str) -> bool:
@@ -197,7 +180,7 @@ def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> li
         if any(k in u.lower() for k in ("iframe", "embed", "ichiran", "list", "room", "bukken", "result", "search")):
             urls.add(u)
 
-    # 3) script 内
+    # 3) script 内：直書き URL と src の両方
     for s in soup.find_all("script"):
         txt = s.string or s.get_text() or ""
         if not txt:
@@ -210,11 +193,6 @@ def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> li
             u = urljoin(base_url, m.group(1))
             if _allow(u):
                 urls.add(u)
-
-    # 4) 生テキスト（外部JS取得時の保険）
-    for u in _harvest_urls_from_text(html, base_url):
-        if _allow(u):
-            urls.add(u)
 
     return list(urls)
 
@@ -244,10 +222,7 @@ def fetch_api_v2_old() -> list[dict]:
     return results
 
 def fetch_public_via_embed() -> list[dict]:
-    """
-    公開ページ(物件トップ: URL)から iframe / 直リンク候補を集め、
-    一覧が出るページを叩いて parse_entries() で部屋を取る。
-    """
+    """公開ページから iframe / 直リンク候補を辿って部屋一覧を取得。"""
     out: list[dict] = []
 
     try:
@@ -274,14 +249,12 @@ def fetch_public_via_embed() -> list[dict]:
         for kw in ("ichiran", "list", "iframe", "embed", "room", "bukken"):
             if kw in u2:
                 score += 1
-        return -score  # sort昇順でスコア大が先頭になるよう負に
+        return -score  # 昇順→大きい順に
 
     tried = 0
     for cand in sorted(cands, key=_score)[:6]:
         tried += 1
         try:
-            if "googletagmanager" in cand:
-                continue
             r = requests.get(cand, headers=PUB_HEADERS, timeout=15)
             r.raise_for_status()
             _dump(f"try{tried}.url.txt", cand)
@@ -291,8 +264,7 @@ def fetch_public_via_embed() -> list[dict]:
             print(f"[fetch] try#{tried} {cand} -> {len(items)} rooms")
             if items:
                 out.extend(items)
-
-                # 簡易ページング（pageIndex/idx/page を順に試す）
+                # 簡易ページング（pageIndex/idx/page）
                 for key in ("pageIndex", "idx", "page"):
                     for i in range(1, 5):
                         u = _set_query(cand, **{key: i})
@@ -307,7 +279,7 @@ def fetch_public_via_embed() -> list[dict]:
                         out.extend(more)
                         if len(more) < 20:
                             break
-                break  # 何かしら拾えたら終了
+                break
         except Exception as e:
             print(f"[fetch] embed fetch error {cand}: {e}")
             continue

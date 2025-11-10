@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 DEBUG = os.getenv("DEBUG", "0") == "1"
 DBG_DIR = os.getenv("DEBUG_DIR", ".debug")
 
-def _dump(name: str, text: str, binary: bool = False):
+def _dump(name: str, text: str | bytes, binary: bool = False):
     if not DEBUG:
         return
     try:
@@ -24,10 +24,10 @@ def _dump(name: str, text: str, binary: bool = False):
         path = os.path.join(DBG_DIR, name)
         if binary:
             with open(path, "wb") as f:
-                f.write(text)
+                f.write(text if isinstance(text, (bytes, bytearray)) else str(text).encode("utf-8", "ignore"))
         else:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
+                f.write(text if isinstance(text, str) else text.decode("utf-8", "ignore"))
     except Exception as e:
         print(f"[debug] dump failed {name}: {e}")
 
@@ -59,12 +59,10 @@ API_HEADERS = {
     "Accept": "application/json, text/javascript, */*;q=0.01",
 }
 
-# 公開ページ/iframe 取得用（HTML）— SSR を返しやすいブラウザ UA にする
+# HTML 取得用（ブラウザ相当の UA）
 PUB_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"),
     "Referer": "https://www.ur-net.go.jp/",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja,en;q=0.8",
@@ -75,6 +73,8 @@ def make_payload(page: int) -> dict:
     return {"danchiCd": DANCHI, "indexNo": str(page), "pageSize": "20"}
 
 # ========= Helpers =========
+_ZEN2HAN = str.maketrans("０１２３４５６７８９", "0123456789")
+
 def in_window(now: datetime) -> bool:
     start = now.replace(hour=WINDOW_START[0], minute=WINDOW_START[1], second=0,  microsecond=0)
     end   = now.replace(hour=WINDOW_END[0],   minute=WINDOW_END[1],   second=59, microsecond=0)
@@ -87,6 +87,9 @@ def decode_area(s: str) -> str:
              .replace("&sup2;", "²")
              .replace("m&sup2;", "m²")
              .replace("\u33a1", "m²"))
+
+def _normalize_text(t: str) -> str:
+    return (t or "").translate(_ZEN2HAN)
 
 def parse_entries(text: str):
     """JSON か HTML を部屋エントリの配列に正規化して返す。"""
@@ -103,8 +106,7 @@ def parse_entries(text: str):
     elif isinstance(data, dict):
         for key in ("result", "resultList", "data", "rows"):
             if key in data and isinstance(data[key], list):
-                items = data[key]
-                break
+                items = data[key]; break
 
     rooms = []
     if items is not None:
@@ -123,14 +125,14 @@ def parse_entries(text: str):
     # 2) HTML（テーブル/カード）をざっくり抽出
     soup = BeautifulSoup(text, "html.parser")
     for c in soup.select("tr, li, .room, .roomCard, .list, .table"):
-        txt = c.get_text(" ", strip=True)
+        txt = _normalize_text(c.get_text(" ", strip=True))
         if not txt:
             continue
         name_m   = re.search(r"(\d{2,4})号室", txt)
-        layout_m = re.search(r"((?:[1-4]LDK)|(?:[1-4]DK)|(?:[1-4]K)|(?:ワンルーム))", txt)
+        layout_m = re.search(r"((?:[1-4]LDK)|(?:[1-4]DK)|(?:[1-4]K)|(?:ﾜﾝﾙｰﾑ|ワンルーム))", txt)
         area_m   = re.search(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)", txt)
         floor_m  = re.search(r"(\d+)\s*階", txt)
-        # 家賃の表記ゆらぎを広めに拾う
+        # 家賃は「199,100円」「賃料 199,100円」の両方を拾う
         rent_m   = re.search(r"(?:賃料[:：]?\s*([\d,]+)\s*円)|(?:\b([\d,]+)\s*円\b)", txt)
         comm_m   = re.search(r"共益?費[:：]?\s*([\d,]+)\s*円", txt)
 
@@ -168,16 +170,20 @@ def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> li
 
     # 1) iframe
     for ifr in soup.find_all("iframe", src=True):
-        u = urljoin(base_url, (ifr.get("src") or "").strip())
-        if u and _allow(u):
+        src = (ifr.get("src") or "").strip()
+        if not src:
+            continue
+        u = urljoin(base_url, src)
+        if _allow(u):
             urls.add(u)
 
     # 2) aタグ（一覧らしい語を優先）
     for a in soup.find_all("a", href=True):
-        u = urljoin(base_url, (a.get("href") or "").strip())
-        if not u or not _allow(u):
+        href = (a.get("href") or "").strip()
+        if not href:
             continue
-        if any(k in u.lower() for k in ("iframe", "embed", "ichiran", "list", "room", "bukken", "result", "search")):
+        u = urljoin(base_url, href)
+        if _allow(u) and any(k in u.lower() for k in ("ichiran", "list", "iframe", "embed", "room", "bukken", "result", "search")):
             urls.add(u)
 
     # 3) script 内：直書き URL と src の両方
@@ -195,6 +201,17 @@ def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> li
                 urls.add(u)
 
     return list(urls)
+
+# --- 物件IDからの既知パターン（iframe/直リンク）を強制追加 ---
+def _forced_listing_urls(prop_id: str) -> list[str]:
+    pid = str(prop_id)
+    base = "https://www.ur-net.go.jp/chintai"
+    return [
+        f"{base}/ichiran/iframe/20_{pid}.html",
+        f"{base}/ichiran/20_{pid}.html",
+        f"{base}/kanto/tokyo/20_{pid}.html#list",
+        f"{base}/kanto/tokyo/20_{pid}.html?md=20_{pid}#list",
+    ]
 
 # ========= Fetchers =========
 def fetch_api_v2_old() -> list[dict]:
@@ -236,6 +253,17 @@ def fetch_public_via_embed() -> list[dict]:
     soup = BeautifulSoup(r0.text, "html.parser")
 
     cands = _collect_candidate_urls(r0.text, soup, URL)
+    # ここが重要：静的HTMLに iframe が無い物件向けに既知パターンを追加
+    cands.extend(_forced_listing_urls(PROP_ID))
+    # 重複排除
+    uniq = []
+    seen = set()
+    for u in cands:
+        if u not in seen:
+            seen.add(u)
+            uniq.append(u)
+    cands = uniq
+
     _dump("candidates.txt", "\n".join(cands))
     print(f"[fetch] outer candidates = {len(cands)}")
     if not cands:
@@ -249,10 +277,12 @@ def fetch_public_via_embed() -> list[dict]:
         for kw in ("ichiran", "list", "iframe", "embed", "room", "bukken"):
             if kw in u2:
                 score += 1
+        if f"20_{PROP_ID}" in u2:
+            score += 2
         return -score  # 昇順→大きい順に
 
     tried = 0
-    for cand in sorted(cands, key=_score)[:6]:
+    for cand in sorted(cands, key=_score)[:8]:
         tried += 1
         try:
             r = requests.get(cand, headers=PUB_HEADERS, timeout=15)

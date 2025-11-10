@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 UR vacancy monitor (GitHub Actions friendly)
-- Try legacy internal POST API -> public iframe/listing -> HTML fallback.
+- Legacy internal POST API -> public iframe/listing -> HTML fallback.
 - Notifies via ChatWork; otherwise prints to logs.
 """
 
@@ -59,9 +59,12 @@ API_HEADERS = {
     "Accept": "application/json, text/javascript, */*; q=0.01",
 }
 
-# 公開ページ/iframe 取得用（HTML）
+# 公開ページ/iframe 取得用（HTML）: SSR を返しやすい普通の UA にする
 PUB_HEADERS = {
-    "User-Agent": "ur-monitor/1.0 (+github-actions)",
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    ),
     "Referer": "https://www.ur-net.go.jp/",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja,en;q=0.8",
@@ -100,7 +103,8 @@ def parse_entries(text: str):
     elif isinstance(data, dict):
         for key in ("result", "resultList", "data", "rows"):
             if key in data and isinstance(data[key], list):
-                items = data[key]; break
+                items = data[key]
+                break
 
     rooms = []
     if items is not None:
@@ -126,7 +130,7 @@ def parse_entries(text: str):
         layout_m = re.search(r"((?:[1-4]LDK)|(?:[1-4]DK)|(?:[1-4]K)|(?:ワンルーム))", txt)
         area_m   = re.search(r"(\d+(?:\.\d+)?)\s*(?:㎡|m²|&#13217;)", txt)
         floor_m  = re.search(r"(\d+)\s*階", txt)
-        rent_m   = re.search(r"賃料[:：]?\s*([\d,]+)\s*円|([\d,]+)\s*円", txt)
+        rent_m   = re.search(r"(?:賃料[:：]?\s*([\d,]+)\s*円)|(?:\b([\d,]+)\s*円\b)", txt)
         comm_m   = re.search(r"共益?費[:：]?\s*([\d,]+)\s*円", txt)
 
         if name_m or rent_m:
@@ -153,40 +157,64 @@ def _set_query(url: str, **kv) -> str:
     new_q = urlencode({k: v[-1] for k, v in q.items()})
     return urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
 
+# --- 生テキストから chintai 系 URL を抜く（外部JSにも対応） ---
+def _harvest_urls_from_text(html: str, base_url: str) -> list[str]:
+    urls: set[str] = set()
+    # 絶対URL
+    for m in re.finditer(r'https?://[^\s\'")<>]+', html):
+        u = m.group(0)
+        pu = urlparse(u)
+        if "ur-net.go.jp" in pu.netloc and "/chintai/" in pu.path and "googletagmanager" not in pu.netloc:
+            urls.add(u)
+    # 相対URL（"/chintai/..."）
+    for m in re.finditer(r'["\'](/[^"\']*chintai/[^"\']+)["\']', html):
+        urls.add(urljoin(base_url, m.group(1)))
+    return list(urls)
+
 # --- 公開ページ → iframe / 直リンク候補の収集 ---
 def _collect_candidate_urls(html: str, soup: BeautifulSoup, base_url: str) -> list[str]:
-    """外枠ページから実一覧に辿れる候補URLを広めに収集して絶対URLで返す。"""
+    """
+    外枠ページから実一覧に辿れる候補URLを広めに収集して絶対URLで返す。
+    *.ur-net.go.jp かつ /chintai/ を含むものだけ採用。GTM は除外。
+    """
     urls: set[str] = set()
+
+    def _allow(u: str) -> bool:
+        pu = urlparse(u)
+        return ("ur-net.go.jp" in pu.netloc) and ("/chintai/" in pu.path) and ("googletagmanager" not in pu.netloc)
 
     # 1) iframe
     for ifr in soup.find_all("iframe", src=True):
-        src = (ifr.get("src") or "").strip()
-        if not src:
-            continue
-        if "googletagmanager" in src:  # GTM は除外
-            continue
-        urls.add(urljoin(base_url, src))
+        u = urljoin(base_url, (ifr.get("src") or "").strip())
+        if u and _allow(u):
+            urls.add(u)
 
-    # 2) aタグ（一覧らしいキーワードを含むもの）
+    # 2) aタグ（一覧らしい語を優先）
     for a in soup.find_all("a", href=True):
-        href = (a.get("href") or "").strip()
-        if not href:
+        u = urljoin(base_url, (a.get("href") or "").strip())
+        if not u or not _allow(u):
             continue
-        if any(k in href for k in ("iframe", "embed", "ichiran", "list", "room", "bukken")):
-            urls.add(urljoin(base_url, href))
+        if any(k in u.lower() for k in ("iframe", "embed", "ichiran", "list", "room", "bukken", "result", "search")):
+            urls.add(u)
 
-    # 3) script内に直書きされたURL
+    # 3) script 内
     for s in soup.find_all("script"):
         txt = s.string or s.get_text() or ""
         if not txt:
             continue
         for m in re.finditer(r"""['"](https?://[^'"]+)['"]""", txt):
             u = m.group(1)
-            if "googletagmanager" in u:
-                continue
-            urls.add(u)
+            if _allow(u):
+                urls.add(u)
         for m in re.finditer(r"""src\s*=\s*['"]([^'"]+)['"]""", txt):
-            urls.add(urljoin(base_url, m.group(1)))
+            u = urljoin(base_url, m.group(1))
+            if _allow(u):
+                urls.add(u)
+
+    # 4) 生テキスト（外部JS取得時の保険）
+    for u in _harvest_urls_from_text(html, base_url):
+        if _allow(u):
+            urls.add(u)
 
     return list(urls)
 

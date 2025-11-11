@@ -1,97 +1,47 @@
-# .github/workflows/ur-monitor.yml
-name: UR Monitor
+name: UR monitor
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "3-59/10 * * * *"   # :03,13,23,33,43,53
-    - cron: "8-59/10 * * * *"   # :08,18,28,38,48,58（冗長化・混雑分散）
-    - cron: "30 0 * * *"        # JST 09:30 ぴったり（UTC 00:30）
-  workflow_dispatch: {}
-
-permissions:
-  contents: write
-
-concurrency:
-  group: ur-${{ github.workflow }}
-  cancel-in-progress: true
+    - cron: "*/10 * * * *"  # 10分ごと（Python側でJST 09:30-19:00以外はスキップ）
 
 jobs:
   run:
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        prop_id: [ "7080", "6940", "5390" ]
-
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    strategy:
+      matrix:
+        prop: [ "5390", "7080" ]  # 監視したい物件IDを並べる
+    env:
+      PROP_ID: ${{ matrix.prop }}
+      CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
+      CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Window gate (JST 09:30–19:00 only)
-        id: gate
-        shell: bash
-        run: |
-          jst_hm=$(TZ=Asia/Tokyo date +%H%M)
-          echo "JST now: $jst_hm"
-          if (( 10#$jst_hm >= 930 && 10#$jst_hm < 1900 )); then
-            echo "inwindow=true"  >> "$GITHUB_OUTPUT"
-          else
-            echo "inwindow=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/setup-python@v5
-        if: steps.gate.outputs.inwindow == 'true'
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.x"
 
       - name: Install deps
-        if: steps.gate.outputs.inwindow == 'true'
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4
+          pip install requests
 
-      - name: Run monitor (${{ matrix.prop_id }})
-        if: steps.gate.outputs.inwindow == 'true'
-        env:
-          PROP_ID: ${{ matrix.prop_id }}
-          STATE_FILE: .state-${{ matrix.prop_id }}.json
-          CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
-          CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
-          DEBUG: "1"                 # ← 追加
+      - name: Run monitor (${{ matrix.prop }})
         run: python ur_monitor.py
 
-      - name: Upload debug artifacts (${{ matrix.prop_id }})
-        if: steps.gate.outputs.inwindow == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-${{ matrix.prop_id }}-${{ github.run_id }}
-          path: .debug/**
-          if-no-files-found: ignore
-          retention-days: 3
-
-      - name: Persist state (${{ matrix.prop_id }})
-        if: steps.gate.outputs.inwindow == 'true'
-        shell: bash
-        env:
-          PROP_ID: ${{ matrix.prop_id }}
+      - name: Persist state (${{ matrix.prop }})
+        if: always()
         run: |
-          set -e
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
-
-          f=".state-${PROP_ID}.json"
-          git add "$f" || true
-          if git diff --cached --quiet -- "$f"; then
+          git add .state_${{ matrix.prop }}.json || true
+          git add .hb_${{ matrix.prop }}.txt || true
+          if ! git diff --cached --quiet; then
+            git commit -m "state update (${{ matrix.prop }})"
+            git push
+          else
             echo "no state changes"
-            exit 0
           fi
-
-          branch="${GITHUB_REF_NAME:-main}"
-          git fetch origin "$branch"
-          git pull --rebase origin "$branch" || true
-          git commit -m "state update (${PROP_ID})" || true
-          git push origin "HEAD:${branch}"

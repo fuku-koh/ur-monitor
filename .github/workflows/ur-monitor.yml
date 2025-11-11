@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        prop: [ "5390", "7080" ]  # 監視したい物件IDを並べる
+        prop: [ "5390", "6940", "7080" ] # 監視したい物件IDを並べる
     env:
       PROP_ID: ${{ matrix.prop }}
       CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}

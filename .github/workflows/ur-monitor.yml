@@ -5,6 +5,14 @@ on:
   schedule:
     - cron: "*/10 * * * *"  # 10分ごと（Python側でJST 09:30-19:00以外はスキップ）
 
+permissions:
+  contents: write
+
+# マトリクスでも push 競合を避けるため直列化（必要に応じて外してOK）
+concurrency:
+  group: state-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -17,7 +25,10 @@ jobs:
       CHATWORK_ROOM_ID: ${{ secrets.CHATWORK_ROOM_ID }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # rebase/pull 用に履歴取得
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,14 +45,35 @@ jobs:
 
       - name: Persist state (${{ matrix.prop }})
         if: always()
+        env:
+          PROP: ${{ matrix.prop }}
         run: |
+          set -euxo pipefail
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
-          git add .state_${{ matrix.prop }}.json || true
-          git add .hb_${{ matrix.prop }}.txt || true
-          if ! git diff --cached --quiet; then
-            git commit -m "state update (${{ matrix.prop }})"
-            git push
-          else
+
+          # 直近の変更を取り込み（non-fast-forward 回避）
+          git pull --rebase --autostash || true
+
+          # 変更ファイルを追加（HBは存在時のみ）
+          git add ".state_${PROP}.json" || true
+          [ -f ".hb_${PROP}.txt" ] && git add ".hb_${PROP}.txt" || true
+
+          if git diff --cached --quiet; then
             echo "no state changes"
+            exit 0
           fi
+
+          # 競合しがちなマトリクス向けにリトライ付き push
+          for i in 1 2 3; do
+            git commit -m "state update (${PROP})" || true
+            if git push; then
+              exit 0
+            fi
+            echo "push failed; pulling & retrying ($i/3)"
+            git pull --rebase --autostash || true
+            sleep 2
+          done
+
+          echo "::error::failed to push after retries"
+          exit 1

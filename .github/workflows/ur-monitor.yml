@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
 
-# マトリクスでも push 競合を避けるため直列化（必要に応じて外してOK）
+# マトリクスでも push 競合を避けるため直列化
 concurrency:
   group: state-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
@@ -18,7 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        prop: [ "5390", "6940", "7080" ] # 監視したい物件IDを並べる
+        # ★大阪3件を追加（5010, 4900, 5020）
+        prop: ["5390", "6940", "7080", "5010", "4900", "5020"]
     env:
       PROP_ID: ${{ matrix.prop }}
       CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
@@ -28,7 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # rebase/pull 用に履歴取得
+          fetch-depth: 0  # rebase/pull 用
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -51,11 +52,8 @@ jobs:
           set -euxo pipefail
           git config user.name  "ur-monitor-bot"
           git config user.email "bot@example.com"
-
-          # 直近の変更を取り込み（non-fast-forward 回避）
           git pull --rebase --autostash || true
 
-          # 変更ファイルを追加（HBは存在時のみ）
           git add ".state_${PROP}.json" || true
           [ -f ".hb_${PROP}.txt" ] && git add ".hb_${PROP}.txt" || true
 
@@ -64,7 +62,6 @@ jobs:
             exit 0
           fi
 
-          # 競合しがちなマトリクス向けにリトライ付き push
           for i in 1 2 3; do
             git commit -m "state update (${PROP})" || true
             if git push; then

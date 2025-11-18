@@ -8,17 +8,32 @@ UR vacancy monitor (GitHub Actions friendly)
 
 import os, json, re, time
 from datetime import datetime, timezone, timedelta
-
 import requests
 
 # ========= Config =========
-PROP_ID     = os.getenv("PROP_ID", "5390")  # 例: 5390, 7080
+PROP_ID     = os.getenv("PROP_ID", "5390")  # 例: 5390, 7080, 5010...
 STATE_PATH  = os.getenv("STATE_FILE", f".state_{PROP_ID}.json")
 CHAT_TOKEN  = os.getenv("CHATWORK_TOKEN", "")
 CHAT_ROOM   = os.getenv("CHATWORK_ROOM_ID", "")
 
+# 物件ごとの地域/支社コード（URLとshisyaに使用）
+PROPERTY_META = {
+    # 東京（関東=20）
+    "5390": ("kanto/tokyo", "20"),
+    "6940": ("kanto/tokyo", "20"),
+    "7080": ("kanto/tokyo", "20"),
+    # 大阪（関西=80）— 追加分
+    "5010": ("kansai/osaka", "80"),
+    "4900": ("kansai/osaka", "80"),
+    "5020": ("kansai/osaka", "80"),
+}
+def _meta_for(prop_id: str):
+    return PROPERTY_META.get(str(prop_id), ("kanto/tokyo", "20"))
+
+AREA_PATH, SHISYA = _meta_for(PROP_ID)
+
 # 人間向けURL（通知に載せる）
-URL = f"https://www.ur-net.go.jp/chintai/kanto/tokyo/20_{PROP_ID}.html"
+URL = f"https://www.ur-net.go.jp/chintai/{AREA_PATH}/{SHISYA}_{PROP_ID}.html"
 
 # 監視時間（JST 09:30〜19:00）
 JST = timezone(timedelta(hours=9))
@@ -37,7 +52,7 @@ HEADERS  = {
     "Pragma": "no-cache",
 }
 
-# 7080だけ特殊コードが存在する（過去実績）
+# 7080だけ特殊コードが存在（過去実績）
 DANCHI_CD_MAP = {
     "7080": "7080e",
 }
@@ -48,37 +63,29 @@ def in_window(now: datetime) -> bool:
     return s <= now <= e
 
 # --- fetch: “以前動いていた”フォームをベースに堅牢化 ---
-def _payload_v1(page_index: int, prop_id: str) -> str:
-    """
-    実績のあるパラメータ列（ユーザ提供スクショ準拠）
-    - shisya=20（東京）
-    - danchi は末尾0を落とした値が実績あり（7080 -> 708）。うまく行かない物件もあるため両案を試行。
-    """
-    # 末尾0を落とした案（7080 -> 708 / 5390 -> 539）
+def _payload_v1(page_index: int, prop_id: str, shisya: str) -> str:
+    # 末尾0を落とした案（7080->708 / 5390->539 / 5010->501）
     danchi_trim = prop_id[:-1] if prop_id.endswith("0") else prop_id
     return (
         "rent_low=&rent_high=&"
         "floorspace_low=&floorspace_high=&"
-        f"shisya=20&danchi={danchi_trim}&"
+        f"shisya={shisya}&danchi={danchi_trim}&"
         "shikibetu=0&newBukkenRoom=&"
         f"orderByField=0&orderBySort=0&pageIndex={page_index}&sp="
     )
 
-def _payload_v1_alt(page_index: int, prop_id: str) -> str:
-    """保険：danchi に PROP_ID をそのまま入れる案（5390 -> 5390 など）"""
+def _payload_v1_alt(page_index: int, prop_id: str, shisya: str) -> str:
+    # danchi=PROP_ID のまま
     return (
         "rent_low=&rent_high=&"
         "floorspace_low=&floorspace_high=&"
-        f"shisya=20&danchi={prop_id}&"
+        f"shisya={shisya}&danchi={prop_id}&"
         "shikibetu=0&newBukkenRoom=&"
         f"orderByField=0&orderBySort=0&pageIndex={page_index}&sp="
     )
 
 def _payload_v2(page_index: int, prop_id: str) -> str:
-    """
-    もう一つの既知形（danchiCd / indexNo）。7080 は 7080e など特殊コードに対応。
-    indexNo は 1 始まり、pageSize=20 を固定。
-    """
+    # 別形式（7080e等に対応）。indexNoは1始まり固定。
     danchi_cd = DANCHI_CD_MAP.get(prop_id, prop_id)
     index_no  = page_index + 1
     return f"danchiCd={danchi_cd}&indexNo={index_no}&pageSize=20"
@@ -86,11 +93,11 @@ def _payload_v2(page_index: int, prop_id: str) -> str:
 def _try_fetch_page(page_index: int, prop_id: str):
     """
     1ページだけ取得して標準化した list[tuple] を返す。
-    JSON にならなければ None を返して上位で安全停止。
+    JSONにならなければ None（上位で安全停止）。
     """
     payloads = [
-        _payload_v1(page_index, prop_id),
-        _payload_v1_alt(page_index, prop_id),
+        _payload_v1(page_index, prop_id, SHISYA),
+        _payload_v1_alt(page_index, prop_id, SHISYA),
         _payload_v2(page_index, prop_id),
     ]
     for pi, data in enumerate(payloads, 1):
@@ -125,19 +132,14 @@ def _try_fetch_page(page_index: int, prop_id: str):
                 str(r0.get("rent") or ""),
                 str(r0.get("commonfee") or r0.get("maintenanceFee") or ""),
             ))
-        return out  # 成功
-    return None  # すべて失敗（HTML等）
+        return out
+    return None
 
 def fetch_all() -> set[tuple]:
-    """
-    ページ0..2を走査。途中で“空”になったら打ち切り。
-    JSON化に失敗した場合は None を返し、呼び出し側で状態維持する。
-    """
     items: list[tuple] = []
     for i in (0, 1, 2):
         page = _try_fetch_page(i, PROP_ID)
         if page is None:
-            # 壊れた応答（HTML等）が混じるときは安全停止
             print(f"[fetch] page{i}: decode_failed -> keep_state")
             return None
         if not page:
@@ -167,9 +169,6 @@ def save_state(s: set):
     os.replace(tmp, STATE_PATH)
 
 def canonicalize(rows: set[tuple]) -> set[tuple]:
-    """
-    既に tuple なので軽微な正規化のみ（空白/カンマ除去、㎡→m²など必要最低限）。
-    """
     def norm(s: str) -> str:
         if s is None:
             return ""
@@ -177,7 +176,7 @@ def canonicalize(rows: set[tuple]) -> set[tuple]:
         s = s.replace("㎡", "m²").replace("\u33a1", "m²").replace("&sup2;", "²").replace("m&sup2;", "m²")
         return re.sub(r"[,\s]", "", s)
     out = set()
-    for (rid, name, typ, area, floor, rent, fee) in rows:
+    for (_rid, name, typ, area, floor, rent, fee) in rows:
         out.add((norm(name), norm(typ), norm(area), norm(floor), norm(rent), norm(fee)))
     return out
 

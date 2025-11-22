@@ -22,6 +22,8 @@ PROPERTY_META = {
     "5390": ("kanto/tokyo", "20"),
     "6940": ("kanto/tokyo", "20"),
     "7080": ("kanto/tokyo", "20"),
+    "7140": ("kanto/tokyo", "20"),
+    "7100": ("kanto/tokyo", "20"),
     # 大阪（関西=80）— 追加分
     "5010": ("kansai/osaka", "80"),
     "4900": ("kansai/osaka", "80"),

@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         # ★大阪3件を追加（5010, 4900, 5020）
-        prop: ["5390", "6940", "7080", "5010", "4900", "5020"]
+        prop: ["5390", "6940", "7080", "7140", "7100", "5010", "4900", "5020"]
     env:
       PROP_ID: ${{ matrix.prop }}
       CHATWORK_TOKEN: ${{ secrets.CHATWORK_TOKEN }}
